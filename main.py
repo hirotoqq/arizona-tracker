@@ -24,7 +24,7 @@ async def run_bot():
         else:
             cred = credentials.Certificate("serviceAccount.json")
         firebase_admin.initialize_app(cred, {
-            "databaseURL": "https://arizona-property-tracker-default-rtdb.europe-west1.firebasedatabase.app"
+            "databaseURL": "https://arizona-property-tracker-default-rtdb.firebaseio.com"
         })
 
     BOT_TOKEN = os.environ.get("BOT_TOKEN", "")

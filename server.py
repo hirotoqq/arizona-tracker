@@ -15,7 +15,7 @@ if not firebase_admin._apps:
         cred = credentials.Certificate("serviceAccount.json")
     
     firebase_admin.initialize_app(cred, {
-        "databaseURL": "https://arizona-property-tracker-default-rtdb.europe-west1.firebasedatabase.app"
+        "databaseURL": "https://arizona-property-tracker-default-rtdb.firebaseio.com"
     })
 
 @app.route("/update", methods=["POST"])
