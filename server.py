@@ -20,14 +20,18 @@ if not firebase_admin._apps:
 
 @app.route("/update", methods=["POST"])
 def update():
-    data = request.get_json()
+    data = request.get_json(force=True, silent=True)
     if not data:
+        print("DEBUG: no data received")
         return jsonify({"error": "no data"}), 400
 
     server  = data.get("server")
     entries = data.get("entries", [])
 
+    print(f"DEBUG server={server} entries={entries}")
+
     if not server or not entries:
+        print("DEBUG: missing fields")
         return jsonify({"error": "missing fields"}), 400
 
     now = int(time.time())
