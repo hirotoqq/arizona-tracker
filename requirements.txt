@@ -1,0 +1,4 @@
+flask
+firebase-admin
+python-telegram-bot==20.7
+gunicorn
