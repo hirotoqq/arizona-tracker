@@ -20,7 +20,13 @@ if not firebase_admin._apps:
 
 @app.route("/update", methods=["POST"])
 def update():
-    data = request.get_json(force=True, silent=True)
+    raw = request.get_data(as_text=False)
+    print(f"DEBUG raw={raw[:200]}")
+    try:
+    data = json.loads(raw.decode('utf-8', errors='replace'))
+except Exception as e:
+    print(f"DEBUG parse error: {e}")
+    return jsonify({"error": "parse error"}), 400
     if not data:
         print("DEBUG: no data received")
         return jsonify({"error": "no data"}), 400
