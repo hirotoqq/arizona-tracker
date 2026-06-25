@@ -1,15 +1,22 @@
 from flask import Flask, request, jsonify
 import firebase_admin
 from firebase_admin import credentials, db
-import os, time
+import os, time, json
 
 app = Flask(__name__)
 
-# Инициализация Firebase
-cred = credentials.Certificate("serviceAccount.json")  # твой скачанный json
-firebase_admin.initialize_app(cred, {
-    "databaseURL": "https://arizona-property-tracker-default-rtdb.europe-west1.firebasedatabase.app"
-})
+# Инициализация Firebase через переменную окружения
+if not firebase_admin._apps:
+    firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
+    if firebase_json:
+        cred_dict = json.loads(firebase_json)
+        cred = credentials.Certificate(cred_dict)
+    else:
+        cred = credentials.Certificate("serviceAccount.json")
+    
+    firebase_admin.initialize_app(cred, {
+        "databaseURL": "https://arizona-property-tracker-default-rtdb.europe-west1.firebasedatabase.app"
+    })
 
 @app.route("/update", methods=["POST"])
 def update():
@@ -26,20 +33,16 @@ def update():
     now = int(time.time())
     ref = db.reference(f"properties/{server}")
 
-    # Читаем существующие записи
     existing = ref.get() or {}
 
-    # Определяем какие типы пришли в этом скане
     incoming_types = set(e["propType"] for e in entries)
 
-    # Удаляем старые записи только того же типа
     kept = {
         k: v for k, v in existing.items()
         if v.get("propType") not in incoming_types
         and v.get("expiryTs", 0) > now
     }
 
-    # Добавляем новые
     for e in entries:
         key = f"{e['propType']}_{e['expiryTs']}_{now}"
         kept[key] = {
@@ -56,9 +59,9 @@ def update():
 
 @app.route("/list", methods=["GET"])
 def list_props():
-    now        = int(time.time())
+    now           = int(time.time())
     server_filter = request.args.get("server")
-    hours_max  = request.args.get("hours")  # фильтр "покажи слёты в ближайшие N часов"
+    hours_max     = request.args.get("hours")
 
     ref  = db.reference("properties")
     data = ref.get() or {}
@@ -86,6 +89,11 @@ def list_props():
 
     result.sort(key=lambda x: x["expiryTs"])
     return jsonify(result)
+
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":

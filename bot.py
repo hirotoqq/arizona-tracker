@@ -4,10 +4,17 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 import firebase_admin
 from firebase_admin import credentials, db
+import json
 
-# ── Firebase ──────────────────────────────────────────────
+# Инициализация Firebase через переменную окружения
 if not firebase_admin._apps:
-    cred = credentials.Certificate("serviceAccount.json")
+    firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
+    if firebase_json:
+        cred_dict = json.loads(firebase_json)
+        cred = credentials.Certificate(cred_dict)
+    else:
+        cred = credentials.Certificate("serviceAccount.json")
+
     firebase_admin.initialize_app(cred, {
         "databaseURL": "https://arizona-property-tracker-default-rtdb.europe-west1.firebasedatabase.app"
     })
