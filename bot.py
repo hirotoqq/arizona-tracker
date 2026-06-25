@@ -1,7 +1,7 @@
 import asyncio, time, os
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, ApplicationBuilder
 import firebase_admin
 from firebase_admin import credentials, db
 import json
