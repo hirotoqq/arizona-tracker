@@ -13,7 +13,7 @@ if not firebase_admin._apps:
         cred = credentials.Certificate(cred_dict)
     else:
         cred = credentials.Certificate("serviceAccount.json")
-    
+
     firebase_admin.initialize_app(cred, {
         "databaseURL": "https://arizona-property-tracker-default-rtdb.firebaseio.com"
     })
@@ -23,10 +23,11 @@ def update():
     raw = request.get_data(as_text=False)
     print(f"DEBUG raw={raw[:200]}")
     try:
-    data = json.loads(raw.decode('utf-8', errors='replace'))
-except Exception as e:
-    print(f"DEBUG parse error: {e}")
-    return jsonify({"error": "parse error"}), 400
+        data = json.loads(raw.decode('utf-8', errors='replace'))
+    except Exception as e:
+        print(f"DEBUG parse error: {e}")
+        return jsonify({"error": "parse error"}), 400
+
     if not data:
         print("DEBUG: no data received")
         return jsonify({"error": "no data"}), 400
