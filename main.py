@@ -27,7 +27,7 @@ async def run_bot():
             "databaseURL": "https://arizona-property-tracker-default-rtdb.europe-west1.firebasedatabase.app"
         })
 
-    BOT_TOKEN    = os.environ.get("8553840061:AAEdyM4rW2FsIm_4LUhHBv1dOImi-xrOmjE", "")
+    BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
     NOTIFY_HOURS = 3
     subscribers  = set()
     notified     = set()

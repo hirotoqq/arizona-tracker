@@ -20,7 +20,7 @@ if not firebase_admin._apps:
     })
 
 # ── Настройки ─────────────────────────────────────────────
-BOT_TOKEN       = "8553840061:AAGGy8Zh4muaVgjwmU85tBoyIusAVP4bazE"
+BOT_TOKEN       = os.environ.get("BOT_TOKEN", "")
 NOTIFY_HOURS    = 3        # за сколько часов предупреждать о слёте
 CHECK_INTERVAL  = 300      # проверка каждые 5 минут
 
