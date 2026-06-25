@@ -174,7 +174,9 @@ async def notify_loop(app):
 
 # ── Запуск ────────────────────────────────────────────────
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(
+        os.environ.get("BOT_TOKEN", BOT_TOKEN)
+    ).build()
 
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("list",     cmd_list))
@@ -184,7 +186,8 @@ def main():
     app.add_handler(CommandHandler("unnotify", cmd_unnotify))
     app.add_handler(CallbackQueryHandler(cb_server, pattern="^srv_"))
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     loop.create_task(notify_loop(app))
 
     print("Бот запущен!")
