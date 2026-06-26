@@ -167,7 +167,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Этот бот помогает отслеживать слёты домов и бизнесов "
         "на серверах Arizona RP\\.\n\n"
         "📡 Данные собираются автоматически от игроков с установленным скриптом\\.\n\n"
-        "👨‍💻 Создатель: @hiroto\n\n"
+        "👨‍💻 Создатель: @hirotoqq\n\n"
         "Используй кнопки внизу экрана для навигации\\."
     )
     await update.message.reply_text(
@@ -269,7 +269,7 @@ async def show_lottery_menu(update, ctx):
     text = (
         f"🎰 *Уведомления о лотерее*\n\n"
         f"Статус: {status}\n"
-        f"Билеты продаются каждый день в 21:10 МСК.\n"
+        f"Билеты слетают каждый день в 21:10 МСК.\n"
         f"Уведомление приходит в 21:05 МСК."
     )
     if update.message:
@@ -284,7 +284,7 @@ async def show_about(update, ctx):
         "📡 Данные собираются автоматически от игроков с Lua скриптом.\n"
         "🕐 Время отображается по МСК (UTC+3).\n"
         "⚠️ Данные считаются устаревшими через 8 часов без скана.\n\n"
-        "👨‍💻 Создатель: @hiroto"
+        "👨‍💻 Создатель: @hirotoqq"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
