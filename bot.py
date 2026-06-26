@@ -34,8 +34,8 @@ SERVER_ORDER = [
 ]
 
 # ── Подписчики ────────────────────────────────────────────
-subscribers         = set()   # слёты
-lottery_subscribers = set()   # лотерея
+subscribers         = set()
+lottery_subscribers = set()
 notified            = set()
 lottery_notified    = False
 
@@ -63,15 +63,13 @@ def get_all_props():
     return result
 
 def format_time_msk(ts):
-    """Форматирует UTC timestamp в МСК время."""
-    dt_msk   = datetime.fromtimestamp(ts, tz=MSK)
+    dt_msk    = datetime.fromtimestamp(ts, tz=MSK)
     today_msk = datetime.now(tz=MSK).strftime("%d.%m")
     day = dt_msk.strftime("%d.%m")
     hm  = dt_msk.strftime("%H:%M")
     return hm if day == today_msk else f"{hm} {day}"
 
 def format_last_scan(ts):
-    """Форматирует время последнего скана в МСК."""
     if not ts:
         return "нет данных"
     dt = datetime.fromtimestamp(ts, tz=MSK)
@@ -84,31 +82,28 @@ def prop_type_ru(pt):
 
 def build_list_text(props, title="📋 Актуальные слёты"):
     if not props:
-        return "✅ Слётов нет или данных пока нет\\."
+        return "✅ Слётов нет или данных пока нет."
     lines = [f"*{title}*\n"]
     for p in props:
         bar = "🔴" if p["hoursLeft"] <= 1 else "🟡" if p["hoursLeft"] <= 3 else "🟢"
         lines.append(
             f"{bar} *{p['server']}* — {prop_type_ru(p['propType'])}\n"
             f"    ⏰ Слетит в {format_time_msk(p['expiryTs'])} МСК "
-            f"\\(через {p['hoursLeft']}ч\\)"
+            f"(через {p['hoursLeft']}ч)"
         )
     return "\n".join(lines)
 
 def get_servers_ordered():
-    """Возвращает серверы в фиксированном порядке, только те что есть в БД."""
-    ref  = db.reference("properties")
-    data = ref.get() or {}
+    ref      = db.reference("properties")
+    data     = ref.get() or {}
     existing = set(data.keys())
-    ordered = [s for s in SERVER_ORDER if s in existing]
-    # Добавляем серверы которых нет в SERVER_ORDER (на случай новых)
+    ordered  = [s for s in SERVER_ORDER if s in existing]
     for s in existing:
         if s not in ordered:
             ordered.append(s)
     return ordered
 
 def get_last_scan(server):
-    """Получает время последнего скана сервера из Firebase."""
     ref  = db.reference(f"properties/{server}")
     data = ref.get() or {}
     if not isinstance(data, dict):
@@ -116,16 +111,19 @@ def get_last_scan(server):
     scan_times = [v.get("scanTs", 0) for v in data.values() if isinstance(v, dict)]
     return max(scan_times) if scan_times else None
 
-# ── Главное меню (кнопки) ─────────────────────────────────
+# ── Главное меню ──────────────────────────────────────────
 def main_menu():
     buttons = [
-        [InlineKeyboardButton("📋 Все слёты",          callback_data="action_list")],
-        [InlineKeyboardButton("⚠️ Ближайшие (3ч)",     callback_data="action_soon")],
-        [InlineKeyboardButton("🗺 По серверу",          callback_data="action_servers")],
-        [InlineKeyboardButton("🔔 Уведомления слёты",  callback_data="action_notify_menu")],
-        [InlineKeyboardButton("🎰 Уведомления лотерея",callback_data="action_lottery_menu")],
+        [InlineKeyboardButton("📋 Все слёты",           callback_data="action_list")],
+        [InlineKeyboardButton("⚠️ Ближайшие (3ч)",      callback_data="action_soon")],
+        [InlineKeyboardButton("🗺 По серверу",           callback_data="action_servers")],
+        [InlineKeyboardButton("🔔 Уведомления слёты",   callback_data="action_notify_menu")],
+        [InlineKeyboardButton("🎰 Уведомления лотерея", callback_data="action_lottery_menu")],
     ]
     return InlineKeyboardMarkup(buttons)
+
+def back_menu():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="action_menu")]])
 
 # ── Handlers ──────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -136,12 +134,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu())
 
 async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query   = update.callback_query
     await query.answer()
-    data  = query.data
+    data    = query.data
     chat_id = query.message.chat_id
 
-    # ── Назад в меню
     if data == "action_menu":
         await query.edit_message_text(
             "👋 *Arizona Property Tracker*\n\nВыбери действие:",
@@ -149,33 +146,27 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu()
         )
 
-    # ── Все слёты
     elif data == "action_list":
         props = get_all_props()
-        back  = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="action_menu")]])
         await query.edit_message_text(
             build_list_text(props),
-            parse_mode="MarkdownV2",
-            reply_markup=back
+            parse_mode="Markdown",
+            reply_markup=back_menu()
         )
 
-    # ── Ближайшие 3ч
     elif data == "action_soon":
         props = [p for p in get_all_props() if p["hoursLeft"] <= 3]
-        back  = InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="action_menu")]])
         await query.edit_message_text(
             build_list_text(props, "⚠️ Слёты в ближайшие 3 часа"),
-            parse_mode="MarkdownV2",
-            reply_markup=back
+            parse_mode="Markdown",
+            reply_markup=back_menu()
         )
 
-    # ── Список серверов
     elif data == "action_servers":
         servers = get_servers_ordered()
         if not servers:
-            await query.edit_message_text("Данных пока нет\\.", parse_mode="MarkdownV2")
+            await query.edit_message_text("Данных пока нет.", reply_markup=back_menu())
             return
-        # По 2 кнопки в ряд
         buttons = []
         row = []
         for i, s in enumerate(servers):
@@ -192,102 +183,86 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup(buttons)
         )
 
-    # ── Конкретный сервер
     elif data.startswith("srv_"):
         server    = data.replace("srv_", "")
         props     = [p for p in get_all_props() if p["server"] == server]
         last_scan = get_last_scan(server)
         scan_str  = format_last_scan(last_scan)
-
         text = build_list_text(props, f"📋 {server}")
-        text += f"\n\n🕐 _Последний скан: {scan_str}_"
+        text += f"\n\n🕐 Последний скан: {scan_str}"
+        back = InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")
+        ]])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=back)
 
-        back = InlineKeyboardMarkup([
-            [InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]
-        ])
-        await query.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=back)
-
-    # ── Меню уведомлений слёты
     elif data == "action_notify_menu":
-        is_sub = chat_id in subscribers
+        is_sub  = chat_id in subscribers
+        status  = "✅ Подписан" if is_sub else "❌ Не подписан"
+        btn_txt = "🔕 Отписаться" if is_sub else "🔔 Подписаться"
         buttons = [
-            [InlineKeyboardButton(
-                "🔕 Отписаться" if is_sub else "🔔 Подписаться",
-                callback_data="action_notify_toggle"
-            )],
+            [InlineKeyboardButton(btn_txt, callback_data="action_notify_toggle")],
             [InlineKeyboardButton("◀️ Назад", callback_data="action_menu")],
         ]
-        status = "✅ Подписан" if is_sub else "❌ Не подписан"
         await query.edit_message_text(
-            f"🔔 *Уведомления о слётах*\n\nСтатус: {status}\n"
-            f"Предупреждаю за {NOTIFY_HOURS}ч до слёта\\.",
-            parse_mode="MarkdownV2",
+            f"🔔 *Уведомления о слётах*\n\nСтатус: {status}\nПредупреждаю за {NOTIFY_HOURS}ч до слёта.",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
 
     elif data == "action_notify_toggle":
         if chat_id in subscribers:
             subscribers.discard(chat_id)
-            status = "❌ Не подписан"
-            btn    = "🔔 Подписаться"
+            status  = "❌ Не подписан"
+            btn_txt = "🔔 Подписаться"
         else:
             subscribers.add(chat_id)
-            status = "✅ Подписан"
-            btn    = "🔕 Отписаться"
+            status  = "✅ Подписан"
+            btn_txt = "🔕 Отписаться"
         buttons = [
-            [InlineKeyboardButton(btn, callback_data="action_notify_toggle")],
+            [InlineKeyboardButton(btn_txt, callback_data="action_notify_toggle")],
             [InlineKeyboardButton("◀️ Назад", callback_data="action_menu")],
         ]
         await query.edit_message_text(
-            f"🔔 *Уведомления о слётах*\n\nСтатус: {status}\n"
-            f"Предупреждаю за {NOTIFY_HOURS}ч до слёта\\.",
-            parse_mode="MarkdownV2",
+            f"🔔 *Уведомления о слётах*\n\nСтатус: {status}\nПредупреждаю за {NOTIFY_HOURS}ч до слёта.",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
 
-    # ── Меню уведомлений лотерея
     elif data == "action_lottery_menu":
-        is_sub = chat_id in lottery_subscribers
+        is_sub  = chat_id in lottery_subscribers
+        status  = "✅ Подписан" if is_sub else "❌ Не подписан"
+        btn_txt = "🔕 Отписаться" if is_sub else "🔔 Подписаться"
         buttons = [
-            [InlineKeyboardButton(
-                "🔕 Отписаться" if is_sub else "🔔 Подписаться",
-                callback_data="action_lottery_toggle"
-            )],
+            [InlineKeyboardButton(btn_txt, callback_data="action_lottery_toggle")],
             [InlineKeyboardButton("◀️ Назад", callback_data="action_menu")],
         ]
-        status = "✅ Подписан" if is_sub else "❌ Не подписан"
         await query.edit_message_text(
-            f"🎰 *Уведомления о лотерее*\n\nСтатус: {status}\n"
-            f"Билеты продаются каждый день в 21:10 МСК\\.\n"
-            f"Уведомление приходит в 21:05 МСК\\.",
-            parse_mode="MarkdownV2",
+            f"🎰 *Уведомления о лотерее*\n\nСтатус: {status}\nБилеты продаются каждый день в 21:10 МСК.\nУведомление приходит в 21:05 МСК.",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
 
     elif data == "action_lottery_toggle":
         if chat_id in lottery_subscribers:
             lottery_subscribers.discard(chat_id)
-            status = "❌ Не подписан"
-            btn    = "🔔 Подписаться"
+            status  = "❌ Не подписан"
+            btn_txt = "🔔 Подписаться"
         else:
             lottery_subscribers.add(chat_id)
-            status = "✅ Подписан"
-            btn    = "🔕 Отписаться"
+            status  = "✅ Подписан"
+            btn_txt = "🔕 Отписаться"
         buttons = [
-            [InlineKeyboardButton(btn, callback_data="action_lottery_toggle")],
+            [InlineKeyboardButton(btn_txt, callback_data="action_lottery_toggle")],
             [InlineKeyboardButton("◀️ Назад", callback_data="action_menu")],
         ]
         await query.edit_message_text(
-            f"🎰 *Уведомления о лотерее*\n\nСтатус: {status}\n"
-            f"Билеты продаются каждый день в 21:10 МСК\\.\n"
-            f"Уведомление приходит в 21:05 МСК\\.",
-            parse_mode="MarkdownV2",
+            f"🎰 *Уведомления о лотерее*\n\nСтатус: {status}\nБилеты продаются каждый день в 21:10 МСК.\nУведомление приходит в 21:05 МСК.",
+            parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(buttons)
         )
 
 # ── Фоновые задачи ────────────────────────────────────────
 async def notify_loop(app):
-    """Проверяет слёты и шлёт уведомления."""
     while True:
         await asyncio.sleep(CHECK_INTERVAL)
         props = get_all_props()
@@ -297,25 +272,23 @@ async def notify_loop(app):
                 if key not in notified:
                     notified.add(key)
                     text = (
-                        f"⚠️ *Скоро слёт\\!*\n"
+                        f"⚠️ *Скоро слёт!*\n"
                         f"Сервер: *{p['server']}*\n"
                         f"Тип: {prop_type_ru(p['propType'])}\n"
                         f"Слетит в {format_time_msk(p['expiryTs'])} МСК "
-                        f"\\(через {p['hoursLeft']}ч\\)"
+                        f"(через {p['hoursLeft']}ч)"
                     )
                     for chat_id in subscribers:
                         try:
-                            await app.bot.send_message(chat_id, text, parse_mode="MarkdownV2")
+                            await app.bot.send_message(chat_id, text, parse_mode="Markdown")
                         except Exception:
                             pass
 
 async def lottery_loop(app):
-    """Шлёт уведомление о лотерее в 21:05 МСК каждый день."""
     global lottery_notified
     while True:
         await asyncio.sleep(30)
         now_msk = datetime.now(tz=MSK)
-        # 21:05 МСК
         if now_msk.hour == 21 and now_msk.minute == 5:
             if not lottery_notified:
                 lottery_notified = True
@@ -323,8 +296,8 @@ async def lottery_loop(app):
                     try:
                         await app.bot.send_message(
                             chat_id,
-                            "🎰 *Билеты через 5 минут\\!*\nЛотерея начнётся в 21:10 МСК\\.",
-                            parse_mode="MarkdownV2"
+                            "🎰 *Билеты через 5 минут!*\nЛотерея начнётся в 21:10 МСК.",
+                            parse_mode="Markdown"
                         )
                     except Exception:
                         pass
