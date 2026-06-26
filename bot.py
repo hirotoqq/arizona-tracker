@@ -142,7 +142,7 @@ def permanent_keyboard():
         [KeyboardButton("🗺 По серверу"),        KeyboardButton("🔔 Уведомления")],
         [KeyboardButton("🎰 Лотерея"),           KeyboardButton("ℹ️ О боте")],
     ]
-    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, persistent=True)
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
 
 # ── Inline кнопки ─────────────────────────────────────────
 def back_to_menu_inline():
