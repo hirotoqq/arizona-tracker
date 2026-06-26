@@ -18,12 +18,11 @@ if not firebase_admin._apps:
     })
 
 # ── Настройки ─────────────────────────────────────────────
-BOT_TOKEN          = os.environ.get("BOT_TOKEN", "")
-CHECK_INTERVAL     = 300
-MSK                = timezone(timedelta(hours=3))
-STALE_HOURS        = 8     # через сколько часов данные считаются устаревшими
-PAGE_SIZE          = 10    # слётов на странице
-NOTIFY_HOURS_OPTIONS = [0.5, 1]  # 30 минут, 1 час
+BOT_TOKEN        = os.environ.get("BOT_TOKEN", "")
+CHECK_INTERVAL   = 300
+MSK              = timezone(timedelta(hours=3))
+STALE_HOURS      = 8
+PAGE_SIZE        = 10
 
 # ── Фиксированный порядок серверов ────────────────────────
 SERVER_ORDER = [
@@ -35,19 +34,62 @@ SERVER_ORDER = [
     "Drake", "Space",
 ]
 
-# ── Состояние пользователей ───────────────────────────────
-# { chat_id: notify_hours }
-user_notify_hours   = {}
-subscribers         = set()
-lottery_subscribers = set()
-notified            = set()
-lottery_notified    = False
+# ── Firebase-ключи для подписок ───────────────────────────
+SUBS_REF         = "subscribers"
+LOTTERY_SUBS_REF = "lottery_subscribers"
 
-# ── Вспомогательные функции ───────────────────────────────
-def get_all_props():
-    now  = int(time.time())
-    ref  = db.reference("properties")
-    data = ref.get() or {}
+# ── In-memory кэш нотификаций (ключ → expiryTs) ──────────
+notified: dict[str, int] = {}
+lottery_notified = False
+
+# ── Firebase: подписки ────────────────────────────────────
+def fb_get_subscribers() -> dict:
+    """Возвращает {chat_id_str: {"hours": float}}"""
+    data = db.reference(SUBS_REF).get() or {}
+    return data
+
+def fb_subscribe(chat_id: int, hours: float):
+    db.reference(f"{SUBS_REF}/{chat_id}").set({"hours": hours})
+
+def fb_unsubscribe(chat_id: int):
+    db.reference(f"{SUBS_REF}/{chat_id}").delete()
+
+def fb_set_hours(chat_id: int, hours: float):
+    ref = db.reference(f"{SUBS_REF}/{chat_id}")
+    data = ref.get()
+    if data:
+        ref.update({"hours": hours})
+
+def fb_is_subscribed(chat_id: int) -> bool:
+    return db.reference(f"{SUBS_REF}/{chat_id}").get() is not None
+
+def fb_get_hours(chat_id: int) -> float:
+    data = db.reference(f"{SUBS_REF}/{chat_id}").get()
+    if data and "hours" in data:
+        return float(data["hours"])
+    return 1.0
+
+def fb_get_lottery_subscribers() -> list:
+    data = db.reference(LOTTERY_SUBS_REF).get() or {}
+    return list(data.keys())
+
+def fb_lottery_subscribe(chat_id: int):
+    db.reference(f"{LOTTERY_SUBS_REF}/{chat_id}").set(True)
+
+def fb_lottery_unsubscribe(chat_id: int):
+    db.reference(f"{LOTTERY_SUBS_REF}/{chat_id}").delete()
+
+def fb_is_lottery_subscribed(chat_id: int) -> bool:
+    return db.reference(f"{LOTTERY_SUBS_REF}/{chat_id}").get() is not None
+
+# ── Получение всех свойств (один запрос) ─────────────────
+def get_all_data() -> dict:
+    """Возвращает сырые данные из Firebase одним запросом."""
+    return db.reference("properties").get() or {}
+
+def parse_props(data: dict) -> list:
+    """Парсит сырые данные в список актуальных слётов."""
+    now = int(time.time())
     result = []
     for srv, entries in data.items():
         if not isinstance(entries, dict):
@@ -57,16 +99,25 @@ def get_all_props():
             if expiry <= now:
                 continue
             result.append({
-                "server":   srv,
-                "propType": v.get("propType", "?"),
-                "pd":       v.get("pd", 0),
-                "expiryTs": expiry,
+                "server":    srv,
+                "propType":  v.get("propType", "?"),
+                "pd":        v.get("pd", 0),
+                "expiryTs":  expiry,
                 "hoursLeft": round((expiry - now) / 3600, 1),
-                "scanTs":   v.get("scanTs", 0),
+                "scanTs":    v.get("scanTs", 0),
             })
     result.sort(key=lambda x: x["expiryTs"])
     return result
 
+def get_server_scan_ts(data: dict, server: str):
+    """Вычисляет последний scanTs для сервера из уже загруженных данных."""
+    entries = data.get(server)
+    if not isinstance(entries, dict):
+        return None
+    scan_times = [v.get("scanTs", 0) for v in entries.values() if isinstance(v, dict)]
+    return max(scan_times) if scan_times else None
+
+# ── Вспомогательные функции ───────────────────────────────
 def format_time_msk(ts):
     dt_msk    = datetime.fromtimestamp(ts, tz=MSK)
     today_msk = datetime.now(tz=MSK).strftime("%d.%m")
@@ -90,11 +141,6 @@ def is_stale(scan_ts):
         return True
     return (time.time() - scan_ts) > STALE_HOURS * 3600
 
-def stale_warning(scan_ts):
-    if is_stale(scan_ts):
-        return "⚠️ _Данные устарели (скан > 8ч назад)_\n"
-    return ""
-
 def build_list_text(props, title="📋 Актуальные слёты", page=0):
     if not props:
         return "✅ Слётов нет или данных пока нет.", 0
@@ -109,7 +155,7 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
     lines.append("")
 
     for p in chunk:
-        bar = "🔴" if p["hoursLeft"] <= 1 else "🟡" if p["hoursLeft"] <= 3 else "🟢"
+        bar    = "🔴" if p["hoursLeft"] <= 1 else "🟡" if p["hoursLeft"] <= 3 else "🟢"
         pd_str = f"{p['pd']}pd" if p.get("pd") else ""
         lines.append(
             f"{bar} *{p['server']}* — {prop_type_ru(p['propType'])} {pd_str}\n"
@@ -117,36 +163,14 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
         )
     return "\n".join(lines), total_pages
 
-def get_servers_ordered():
-    ref      = db.reference("properties")
-    data     = ref.get() or {}
-    existing = set(data.keys())
-    ordered  = [s for s in SERVER_ORDER if s in existing]
-    for s in existing:
-        if s not in ordered:
-            ordered.append(s)
-    return ordered
-
-def get_last_scan(server):
-    ref  = db.reference(f"properties/{server}")
-    data = ref.get() or {}
-    if not isinstance(data, dict):
-        return None
-    scan_times = [v.get("scanTs", 0) for v in data.values() if isinstance(v, dict)]
-    return max(scan_times) if scan_times else None
-
-# ── Постоянная клавиатура (внизу экрана) ─────────────────
+# ── Клавиатуры ────────────────────────────────────────────
 def permanent_keyboard():
     keyboard = [
-        [KeyboardButton("📋 Все слёты"),        KeyboardButton("⚠️ Ближайшие")],
-        [KeyboardButton("🗺 По серверу"),        KeyboardButton("🔔 Уведомления")],
-        [KeyboardButton("🎰 Лотерея"),           KeyboardButton("ℹ️ О боте")],
+        [KeyboardButton("📋 Все слёты"),   KeyboardButton("⚠️ Ближайшие")],
+        [KeyboardButton("🗺 По серверу"),  KeyboardButton("🔔 Уведомления")],
+        [KeyboardButton("🎰 Лотерея"),     KeyboardButton("ℹ️ О боте")],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
-
-# ── Inline кнопки ─────────────────────────────────────────
-def back_to_menu_inline():
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="action_menu")]])
 
 def pagination_buttons(page, total_pages, prefix):
     buttons = []
@@ -165,22 +189,18 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
         "👋 *Arizona Property Tracker*\n\n"
         "Этот бот помогает отслеживать слёты домов и бизнесов "
-        "на серверах Arizona RP\\.\n\n"
-        "📡 Данные собираются автоматически от игроков с установленным скриптом\\.\n\n"
+        "на серверах Arizona RP.\n\n"
+        "📡 Данные собираются автоматически от игроков с установленным скриптом.\n\n"
         "👨‍💻 Создатель: @hirotoqq\n\n"
-        "‼️ Правильное время слета отображается если дом/бизнес застрахован(если без страховки, время может быть некорректным)\n\n"
-        "Используй кнопки внизу экрана для навигации\\."
+        "‼️ Правильное время слёта отображается если дом/бизнес застрахован "
+        "(без страховки время может быть некорректным).\n\n"
+        "Используй кнопки внизу экрана для навигации."
     )
-    await update.message.reply_text(
-        text.replace("\\.", "."),
-        parse_mode="Markdown",
-        reply_markup=permanent_keyboard()
-    )
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=permanent_keyboard())
 
-# ── Обработка текстовых кнопок ────────────────────────────
+# ── Текстовые кнопки ──────────────────────────────────────
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
-
     if text == "📋 Все слёты":
         await show_list(update, ctx, page=0)
     elif text == "⚠️ Ближайшие":
@@ -194,19 +214,21 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif text == "ℹ️ О боте":
         await show_about(update, ctx)
 
+# ── Показ списков ─────────────────────────────────────────
 async def show_list(update, ctx, page=0):
-    props = get_all_props()
+    data  = get_all_data()
+    props = parse_props(data)
     text, total = build_list_text(props, page=page)
     buttons = pagination_buttons(page, total, "list")
-    msg = update.message or update.callback_query.message
-    kb  = InlineKeyboardMarkup(buttons) if buttons else None
+    kb = InlineKeyboardMarkup(buttons) if buttons else None
     if update.message:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
     else:
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
 
 async def show_soon(update, ctx, page=0):
-    props = [p for p in get_all_props() if p["hoursLeft"] <= 3]
+    data  = get_all_data()
+    props = [p for p in parse_props(data) if p["hoursLeft"] <= 3]
     text, total = build_list_text(props, "⚠️ Слёты в ближайшие 3 часа", page=page)
     buttons = pagination_buttons(page, total, "soon")
     kb = InlineKeyboardMarkup(buttons) if buttons else None
@@ -216,18 +238,26 @@ async def show_soon(update, ctx, page=0):
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
 
 async def show_servers(update, ctx):
-    servers = get_servers_ordered()
-    if not servers:
+    # ОДИН запрос к Firebase вместо N+1
+    data = get_all_data()
+    if not data:
         msg = "Данных пока нет."
         if update.message:
             await update.message.reply_text(msg)
         else:
             await update.callback_query.edit_message_text(msg)
         return
+
+    # Порядок: сначала из SERVER_ORDER, потом неизвестные
+    ordered = [s for s in SERVER_ORDER if s in data]
+    for s in data:
+        if s not in ordered:
+            ordered.append(s)
+
     buttons = []
     row = []
-    for s in servers:
-        scan_ts = get_last_scan(s)
+    for s in ordered:
+        scan_ts = get_server_scan_ts(data, s)
         icon    = "🔴" if is_stale(scan_ts) else "🟢"
         row.append(InlineKeyboardButton(f"{icon} {s}", callback_data=f"srv_{s}"))
         if len(row) == 2:
@@ -235,6 +265,7 @@ async def show_servers(update, ctx):
             row = []
     if row:
         buttons.append(row)
+
     kb   = InlineKeyboardMarkup(buttons)
     text = "🗺 *Выбери сервер:*\n🟢 — данные свежие  🔴 — данные устарели"
     if update.message:
@@ -244,8 +275,8 @@ async def show_servers(update, ctx):
 
 async def show_notify_menu(update, ctx):
     chat_id = update.effective_chat.id
-    is_sub  = chat_id in subscribers
-    hours   = user_notify_hours.get(chat_id, 1)
+    is_sub  = fb_is_subscribed(chat_id)
+    hours   = fb_get_hours(chat_id) if is_sub else 1.0
     status  = "✅ Подписан" if is_sub else "❌ Не подписан"
     btn     = "🔕 Отписаться" if is_sub else "🔔 Подписаться"
     buttons = [
@@ -255,7 +286,11 @@ async def show_notify_menu(update, ctx):
             InlineKeyboardButton("1 час"  + (" ✓" if hours == 1.0 else ""), callback_data="notify_hours_1.0"),
         ],
     ]
-    text = f"🔔 *Уведомления о слётах*\n\nСтатус: {status}\nПредупреждение за: {'30 мин' if hours == 0.5 else '1 час'}"
+    text = (
+        f"🔔 *Уведомления о слётах*\n\n"
+        f"Статус: {status}\n"
+        f"Предупреждение за: {'30 мин' if hours == 0.5 else '1 час'}"
+    )
     if update.message:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
     else:
@@ -263,7 +298,7 @@ async def show_notify_menu(update, ctx):
 
 async def show_lottery_menu(update, ctx):
     chat_id = update.effective_chat.id
-    is_sub  = chat_id in lottery_subscribers
+    is_sub  = fb_is_lottery_subscribed(chat_id)
     status  = "✅ Подписан" if is_sub else "❌ Не подписан"
     btn     = "🔕 Отписаться" if is_sub else "🔔 Подписаться"
     buttons = [[InlineKeyboardButton(btn, callback_data="action_lottery_toggle")]]
@@ -296,7 +331,6 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     data    = query.data
     chat_id = query.message.chat_id
 
-    # Пагинация списка
     if data.startswith("list_page_"):
         page = int(data.split("_")[-1])
         await show_list(update, ctx, page=page)
@@ -305,102 +339,126 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         page = int(data.split("_")[-1])
         await show_soon(update, ctx, page=page)
 
-    # Сервер
     elif data.startswith("srv_"):
-        server    = data.replace("srv_", "")
-        props     = [p for p in get_all_props() if p["server"] == server]
-        last_scan = get_last_scan(server)
-        scan_str  = format_last_scan(last_scan)
-        warn      = "⚠️ Данные устарели (скан > 8ч назад)\n\n" if is_stale(last_scan) else ""
-        text, total = build_list_text(props, f"📋 {server}", page=0)
-        text = warn + text + f"\n\n🕐 _Последний скан: {scan_str}_"
-        buttons = [[InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]]
+        server = data.replace("srv_", "")
+        # Один запрос — берём и props и scan_ts из одних данных
+        raw     = get_all_data()
+        props   = [p for p in parse_props(raw) if p["server"] == server]
+        scan_ts = get_server_scan_ts(raw, server)
+        scan_str = format_last_scan(scan_ts)
+        warn     = "⚠️ Данные устарели (скан > 8ч назад)\n\n" if is_stale(scan_ts) else ""
+        text, _  = build_list_text(props, f"📋 {server}", page=0)
+        text     = warn + text + f"\n\n🕐 _Последний скан: {scan_str}_"
+        buttons  = [[InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
     elif data == "action_servers":
         await show_servers(update, ctx)
 
-    # Уведомления слёты
     elif data == "action_notify_toggle":
-        if chat_id in subscribers:
-            subscribers.discard(chat_id)
+        if fb_is_subscribed(chat_id):
+            fb_unsubscribe(chat_id)
         else:
-            subscribers.add(chat_id)
+            fb_subscribe(chat_id, 1.0)
         await show_notify_menu(update, ctx)
 
     elif data.startswith("notify_hours_"):
         hours = float(data.replace("notify_hours_", ""))
-        user_notify_hours[chat_id] = hours
+        if fb_is_subscribed(chat_id):
+            fb_set_hours(chat_id, hours)
+        else:
+            fb_subscribe(chat_id, hours)
         await show_notify_menu(update, ctx)
 
-    # Уведомления лотерея
     elif data == "action_lottery_toggle":
-        if chat_id in lottery_subscribers:
-            lottery_subscribers.discard(chat_id)
+        if fb_is_lottery_subscribed(chat_id):
+            fb_lottery_unsubscribe(chat_id)
         else:
-            lottery_subscribers.add(chat_id)
+            fb_lottery_subscribe(chat_id)
         await show_lottery_menu(update, ctx)
 
 # ── Фоновые задачи ────────────────────────────────────────
+def _clean_notified():
+    """Удаляет из notified устаревшие записи (expiryTs уже прошёл)."""
+    now = int(time.time())
+    expired = [k for k, exp in notified.items() if exp <= now]
+    for k in expired:
+        del notified[k]
+
 async def notify_loop(app):
     while True:
         await asyncio.sleep(CHECK_INTERVAL)
-        props = get_all_props()
-        now   = time.time()
-        for p in props:
-            for chat_id in list(subscribers):
-                hours = user_notify_hours.get(chat_id, 1.0)
-                if p["hoursLeft"] <= hours:
-                    key = f"{chat_id}_{p['server']}_{p['propType']}_{p['expiryTs']}"
-                    if key not in notified:
-                        notified.add(key)
-                        text = (
-                            f"⚠️ *Скоро слёт!*\n"
-                            f"Сервер: *{p['server']}*\n"
-                            f"Тип: {prop_type_ru(p['propType'])} {p['pd']}pd\n"
-                            f"Слетит в {format_time_msk(p['expiryTs'])} МСК "
-                            f"(через {p['hoursLeft']}ч)"
-                        )
-                        try:
-                            await app.bot.send_message(chat_id, text, parse_mode="Markdown")
-                        except Exception:
-                            pass
+        try:
+            _clean_notified()
+            data  = get_all_data()
+            props = parse_props(data)
+            subs  = fb_get_subscribers()  # {chat_id_str: {"hours": float}}
+
+            for p in props:
+                for chat_id_str, info in subs.items():
+                    hours   = float(info.get("hours", 1.0)) if isinstance(info, dict) else 1.0
+                    chat_id = int(chat_id_str)
+                    if p["hoursLeft"] <= hours:
+                        key = f"{chat_id}_{p['server']}_{p['propType']}_{p['expiryTs']}"
+                        if key not in notified:
+                            notified[key] = p["expiryTs"]
+                            text = (
+                                f"⚠️ *Скоро слёт!*\n"
+                                f"Сервер: *{p['server']}*\n"
+                                f"Тип: {prop_type_ru(p['propType'])} {p['pd']}pd\n"
+                                f"Слетит в {format_time_msk(p['expiryTs'])} МСК "
+                                f"(через {p['hoursLeft']}ч)"
+                            )
+                            try:
+                                await app.bot.send_message(chat_id, text, parse_mode="Markdown")
+                            except Exception as e:
+                                print(f"[notify] ошибка отправки {chat_id}: {e}")
+        except Exception as e:
+            print(f"[notify_loop] ошибка: {e}")
 
 async def lottery_loop(app):
     global lottery_notified
     while True:
         await asyncio.sleep(30)
-        now_msk = datetime.now(tz=MSK)
-        if now_msk.hour == 21 and now_msk.minute == 5:
-            if not lottery_notified:
-                lottery_notified = True
-                for chat_id in lottery_subscribers:
-                    try:
-                        await app.bot.send_message(
-                            chat_id,
-                            "🎰 *Билеты через 5 минут!*\nЛотерея начнётся в 21:10 МСК.",
-                            parse_mode="Markdown"
-                        )
-                    except Exception:
-                        pass
-        else:
-            lottery_notified = False
+        try:
+            now_msk = datetime.now(tz=MSK)
+            if now_msk.hour == 21 and now_msk.minute == 5:
+                if not lottery_notified:
+                    lottery_notified = True
+                    subs = fb_get_lottery_subscribers()
+                    for chat_id_str in subs:
+                        try:
+                            await app.bot.send_message(
+                                int(chat_id_str),
+                                "🎰 *Билеты через 5 минут!*\nЛотерея начнётся в 21:10 МСК.",
+                                parse_mode="Markdown"
+                            )
+                        except Exception as e:
+                            print(f"[lottery] ошибка отправки {chat_id_str}: {e}")
+            else:
+                lottery_notified = False
+        except Exception as e:
+            print(f"[lottery_loop] ошибка: {e}")
+
+# ── post_init: запуск фоновых задач ВНУТРИ event loop бота ─
+async def post_init(app):
+    asyncio.create_task(notify_loop(app))
+    asyncio.create_task(lottery_loop(app))
+    print("Фоновые задачи запущены.")
 
 # ── Запуск ────────────────────────────────────────────────
 def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.create_task(notify_loop(app))
-    loop.create_task(lottery_loop(app))
-
     print("Бот запущен!")
-    app.run_polling()
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
