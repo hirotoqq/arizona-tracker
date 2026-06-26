@@ -1,5 +1,6 @@
 import asyncio, time, os, json
 from datetime import datetime, timezone, timedelta
+from functools import partial
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import firebase_admin
@@ -19,10 +20,14 @@ if not firebase_admin._apps:
 
 # ── Настройки ─────────────────────────────────────────────
 BOT_TOKEN        = os.environ.get("BOT_TOKEN", "")
-CHECK_INTERVAL   = 300
+CHECK_INTERVAL   = 300       # секунд между проверками уведомлений
 MSK              = timezone(timedelta(hours=3))
 STALE_HOURS      = 8
 PAGE_SIZE        = 10
+CACHE_TTL        = 60        # секунд кэша Firebase
+RATE_LIMIT_SEC   = 1.5       # минимум секунд между нажатиями у одного юзера
+NOTIFY_BATCH     = 25        # сообщений за раз перед паузой
+CLEANUP_INTERVAL = 3600      # секунд между очисткой Firebase
 
 # ── Фиксированный порядок серверов ────────────────────────
 SERVER_ORDER = [
@@ -38,57 +43,92 @@ SERVER_ORDER = [
 SUBS_REF         = "subscribers"
 LOTTERY_SUBS_REF = "lottery_subscribers"
 
+# ── Кэш Firebase в памяти ────────────────────────────────
+_cache: dict = {"data": {}, "ts": 0.0}
+
+# ── Rate limiting ─────────────────────────────────────────
+_last_action: dict[int, float] = {}
+
 # ── In-memory кэш нотификаций (ключ → expiryTs) ──────────
 notified: dict[str, int] = {}
 lottery_notified = False
 
-# ── Firebase: подписки ────────────────────────────────────
-def fb_get_subscribers() -> dict:
-    """Возвращает {chat_id_str: {"hours": float}}"""
-    data = db.reference(SUBS_REF).get() or {}
+# ── Асинхронная обёртка для синхронных Firebase-вызовов ──
+async def fb_run(func, *args, **kwargs):
+    """Запускает синхронный Firebase-вызов в пуле потоков,
+    не блокируя event loop бота."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, partial(func, *args, **kwargs))
+
+# ── Firebase: properties ──────────────────────────────────
+def _fb_get_all_data_sync() -> dict:
+    return db.reference("properties").get() or {}
+
+async def get_all_data() -> dict:
+    """Возвращает данные из кэша или Firebase (один запрос, не блокирует loop)."""
+    now = time.time()
+    if now - _cache["ts"] < CACHE_TTL:
+        return _cache["data"]
+    data = await fb_run(_fb_get_all_data_sync)
+    _cache["data"] = data
+    _cache["ts"]   = now
     return data
 
-def fb_subscribe(chat_id: int, hours: float):
+def invalidate_cache():
+    _cache["ts"] = 0.0
+
+# ── Firebase: подписки (синхронные хелперы для run_in_executor) ──
+def _fb_get_subscribers_sync() -> dict:
+    return db.reference(SUBS_REF).get() or {}
+
+def _fb_subscribe_sync(chat_id: int, hours: float):
     db.reference(f"{SUBS_REF}/{chat_id}").set({"hours": hours})
 
-def fb_unsubscribe(chat_id: int):
+def _fb_unsubscribe_sync(chat_id: int):
     db.reference(f"{SUBS_REF}/{chat_id}").delete()
 
-def fb_set_hours(chat_id: int, hours: float):
-    ref = db.reference(f"{SUBS_REF}/{chat_id}")
+def _fb_set_hours_sync(chat_id: int, hours: float):
+    ref  = db.reference(f"{SUBS_REF}/{chat_id}")
     data = ref.get()
     if data:
         ref.update({"hours": hours})
 
-def fb_is_subscribed(chat_id: int) -> bool:
+def _fb_is_subscribed_sync(chat_id: int) -> bool:
     return db.reference(f"{SUBS_REF}/{chat_id}").get() is not None
 
-def fb_get_hours(chat_id: int) -> float:
+def _fb_get_hours_sync(chat_id: int) -> float:
     data = db.reference(f"{SUBS_REF}/{chat_id}").get()
     if data and "hours" in data:
         return float(data["hours"])
     return 1.0
 
-def fb_get_lottery_subscribers() -> list:
+def _fb_get_lottery_subscribers_sync() -> list:
     data = db.reference(LOTTERY_SUBS_REF).get() or {}
     return list(data.keys())
 
-def fb_lottery_subscribe(chat_id: int):
+def _fb_lottery_subscribe_sync(chat_id: int):
     db.reference(f"{LOTTERY_SUBS_REF}/{chat_id}").set(True)
 
-def fb_lottery_unsubscribe(chat_id: int):
+def _fb_lottery_unsubscribe_sync(chat_id: int):
     db.reference(f"{LOTTERY_SUBS_REF}/{chat_id}").delete()
 
-def fb_is_lottery_subscribed(chat_id: int) -> bool:
+def _fb_is_lottery_subscribed_sync(chat_id: int) -> bool:
     return db.reference(f"{LOTTERY_SUBS_REF}/{chat_id}").get() is not None
 
-# ── Получение всех свойств (один запрос) ─────────────────
-def get_all_data() -> dict:
-    """Возвращает сырые данные из Firebase одним запросом."""
-    return db.reference("properties").get() or {}
+# ── Асинхронные обёртки для подписок ─────────────────────
+async def fb_get_subscribers():       return await fb_run(_fb_get_subscribers_sync)
+async def fb_subscribe(c, h):         await fb_run(_fb_subscribe_sync, c, h)
+async def fb_unsubscribe(c):          await fb_run(_fb_unsubscribe_sync, c)
+async def fb_set_hours(c, h):         await fb_run(_fb_set_hours_sync, c, h)
+async def fb_is_subscribed(c):        return await fb_run(_fb_is_subscribed_sync, c)
+async def fb_get_hours(c):            return await fb_run(_fb_get_hours_sync, c)
+async def fb_get_lottery_subs():      return await fb_run(_fb_get_lottery_subscribers_sync)
+async def fb_lottery_subscribe(c):    await fb_run(_fb_lottery_subscribe_sync, c)
+async def fb_lottery_unsubscribe(c):  await fb_run(_fb_lottery_unsubscribe_sync, c)
+async def fb_is_lottery_subscribed(c): return await fb_run(_fb_is_lottery_subscribed_sync, c)
 
+# ── Парсинг данных ────────────────────────────────────────
 def parse_props(data: dict) -> list:
-    """Парсит сырые данные в список актуальных слётов."""
     now = int(time.time())
     result = []
     for srv, entries in data.items():
@@ -110,14 +150,13 @@ def parse_props(data: dict) -> list:
     return result
 
 def get_server_scan_ts(data: dict, server: str):
-    """Вычисляет последний scanTs для сервера из уже загруженных данных."""
     entries = data.get(server)
     if not isinstance(entries, dict):
         return None
     scan_times = [v.get("scanTs", 0) for v in entries.values() if isinstance(v, dict)]
     return max(scan_times) if scan_times else None
 
-# ── Вспомогательные функции ───────────────────────────────
+# ── Форматирование ────────────────────────────────────────
 def format_time_msk(ts):
     dt_msk    = datetime.fromtimestamp(ts, tz=MSK)
     today_msk = datetime.now(tz=MSK).strftime("%d.%m")
@@ -128,8 +167,7 @@ def format_time_msk(ts):
 def format_last_scan(ts):
     if not ts:
         return "нет данных"
-    dt = datetime.fromtimestamp(ts, tz=MSK)
-    return dt.strftime("%d.%m %H:%M МСК")
+    return datetime.fromtimestamp(ts, tz=MSK).strftime("%d.%m %H:%M МСК")
 
 def prop_type_ru(pt):
     if pt == "house":    return "Дом"
@@ -184,6 +222,15 @@ def pagination_buttons(page, total_pages, prefix):
     buttons.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"{prefix}_page_{page}")])
     return buttons
 
+# ── Rate limiting ─────────────────────────────────────────
+def check_rate_limit(chat_id: int) -> bool:
+    """Возвращает True если действие разрешено, False если слишком быстро."""
+    now = time.time()
+    if now - _last_action.get(chat_id, 0) < RATE_LIMIT_SEC:
+        return False
+    _last_action[chat_id] = now
+    return True
+
 # ── /start ────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -216,7 +263,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── Показ списков ─────────────────────────────────────────
 async def show_list(update, ctx, page=0):
-    data  = get_all_data()
+    data  = await get_all_data()
     props = parse_props(data)
     text, total = build_list_text(props, page=page)
     buttons = pagination_buttons(page, total, "list")
@@ -227,7 +274,7 @@ async def show_list(update, ctx, page=0):
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
 
 async def show_soon(update, ctx, page=0):
-    data  = get_all_data()
+    data  = await get_all_data()
     props = [p for p in parse_props(data) if p["hoursLeft"] <= 3]
     text, total = build_list_text(props, "⚠️ Слёты в ближайшие 3 часа", page=page)
     buttons = pagination_buttons(page, total, "soon")
@@ -238,8 +285,7 @@ async def show_soon(update, ctx, page=0):
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
 
 async def show_servers(update, ctx):
-    # ОДИН запрос к Firebase вместо N+1
-    data = get_all_data()
+    data = await get_all_data()
     if not data:
         msg = "Данных пока нет."
         if update.message:
@@ -248,7 +294,6 @@ async def show_servers(update, ctx):
             await update.callback_query.edit_message_text(msg)
         return
 
-    # Порядок: сначала из SERVER_ORDER, потом неизвестные
     ordered = [s for s in SERVER_ORDER if s in data]
     for s in data:
         if s not in ordered:
@@ -275,8 +320,8 @@ async def show_servers(update, ctx):
 
 async def show_notify_menu(update, ctx):
     chat_id = update.effective_chat.id
-    is_sub  = fb_is_subscribed(chat_id)
-    hours   = fb_get_hours(chat_id) if is_sub else 1.0
+    is_sub  = await fb_is_subscribed(chat_id)
+    hours   = await fb_get_hours(chat_id) if is_sub else 1.0
     status  = "✅ Подписан" if is_sub else "❌ Не подписан"
     btn     = "🔕 Отписаться" if is_sub else "🔔 Подписаться"
     buttons = [
@@ -298,7 +343,7 @@ async def show_notify_menu(update, ctx):
 
 async def show_lottery_menu(update, ctx):
     chat_id = update.effective_chat.id
-    is_sub  = fb_is_lottery_subscribed(chat_id)
+    is_sub  = await fb_is_lottery_subscribed(chat_id)
     status  = "✅ Подписан" if is_sub else "❌ Не подписан"
     btn     = "🔕 Отписаться" if is_sub else "🔔 Подписаться"
     buttons = [[InlineKeyboardButton(btn, callback_data="action_lottery_toggle")]]
@@ -327,9 +372,15 @@ async def show_about(update, ctx):
 # ── Inline callbacks ───────────────────────────────────────
 async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query   = update.callback_query
-    await query.answer()
-    data    = query.data
     chat_id = query.message.chat_id
+
+    # Rate limiting
+    if not check_rate_limit(chat_id):
+        await query.answer("⏳ Подожди немного...", show_alert=False)
+        return
+
+    await query.answer()
+    data = query.data
 
     if data.startswith("list_page_"):
         page = int(data.split("_")[-1])
@@ -340,11 +391,10 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_soon(update, ctx, page=page)
 
     elif data.startswith("srv_"):
-        server = data.replace("srv_", "")
-        # Один запрос — берём и props и scan_ts из одних данных
-        raw     = get_all_data()
-        props   = [p for p in parse_props(raw) if p["server"] == server]
-        scan_ts = get_server_scan_ts(raw, server)
+        server   = data.replace("srv_", "")
+        raw      = await get_all_data()
+        props    = [p for p in parse_props(raw) if p["server"] == server]
+        scan_ts  = get_server_scan_ts(raw, server)
         scan_str = format_last_scan(scan_ts)
         warn     = "⚠️ Данные устарели (скан > 8ч назад)\n\n" if is_stale(scan_ts) else ""
         text, _  = build_list_text(props, f"📋 {server}", page=0)
@@ -356,43 +406,60 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_servers(update, ctx)
 
     elif data == "action_notify_toggle":
-        if fb_is_subscribed(chat_id):
-            fb_unsubscribe(chat_id)
+        if await fb_is_subscribed(chat_id):
+            await fb_unsubscribe(chat_id)
         else:
-            fb_subscribe(chat_id, 1.0)
+            await fb_subscribe(chat_id, 1.0)
         await show_notify_menu(update, ctx)
 
     elif data.startswith("notify_hours_"):
         hours = float(data.replace("notify_hours_", ""))
-        if fb_is_subscribed(chat_id):
-            fb_set_hours(chat_id, hours)
+        if await fb_is_subscribed(chat_id):
+            await fb_set_hours(chat_id, hours)
         else:
-            fb_subscribe(chat_id, hours)
+            await fb_subscribe(chat_id, hours)
         await show_notify_menu(update, ctx)
 
     elif data == "action_lottery_toggle":
-        if fb_is_lottery_subscribed(chat_id):
-            fb_lottery_unsubscribe(chat_id)
+        if await fb_is_lottery_subscribed(chat_id):
+            await fb_lottery_unsubscribe(chat_id)
         else:
-            fb_lottery_subscribe(chat_id)
+            await fb_lottery_subscribe(chat_id)
         await show_lottery_menu(update, ctx)
 
 # ── Фоновые задачи ────────────────────────────────────────
 def _clean_notified():
-    """Удаляет из notified устаревшие записи (expiryTs уже прошёл)."""
     now = int(time.time())
     expired = [k for k, exp in notified.items() if exp <= now]
     for k in expired:
         del notified[k]
+
+async def _send_batch(bot, messages: list[tuple[int, str]]):
+    """Отправляет сообщения пачками по NOTIFY_BATCH с паузой между пачками."""
+    for i in range(0, len(messages), NOTIFY_BATCH):
+        batch = messages[i:i + NOTIFY_BATCH]
+        tasks = []
+        for chat_id, text in batch:
+            tasks.append(asyncio.create_task(
+                bot.send_message(chat_id, text, parse_mode="Markdown")
+            ))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for (chat_id, _), result in zip(batch, results):
+            if isinstance(result, Exception):
+                print(f"[notify] ошибка {chat_id}: {result}")
+        if i + NOTIFY_BATCH < len(messages):
+            await asyncio.sleep(1)  # пауза между пачками — не превышаем лимит TG
 
 async def notify_loop(app):
     while True:
         await asyncio.sleep(CHECK_INTERVAL)
         try:
             _clean_notified()
-            data  = get_all_data()
+            data  = await get_all_data()
             props = parse_props(data)
-            subs  = fb_get_subscribers()  # {chat_id_str: {"hours": float}}
+            subs  = await fb_get_subscribers()  # {chat_id_str: {"hours": float}}
+
+            to_send: list[tuple[int, str]] = []
 
             for p in props:
                 for chat_id_str, info in subs.items():
@@ -409,10 +476,12 @@ async def notify_loop(app):
                                 f"Слетит в {format_time_msk(p['expiryTs'])} МСК "
                                 f"(через {p['hoursLeft']}ч)"
                             )
-                            try:
-                                await app.bot.send_message(chat_id, text, parse_mode="Markdown")
-                            except Exception as e:
-                                print(f"[notify] ошибка отправки {chat_id}: {e}")
+                            to_send.append((chat_id, text))
+
+            if to_send:
+                print(f"[notify] отправляем {len(to_send)} уведомлений")
+                await _send_batch(app.bot, to_send)
+
         except Exception as e:
             print(f"[notify_loop] ошибка: {e}")
 
@@ -425,25 +494,44 @@ async def lottery_loop(app):
             if now_msk.hour == 21 and now_msk.minute == 5:
                 if not lottery_notified:
                     lottery_notified = True
-                    subs = fb_get_lottery_subscribers()
-                    for chat_id_str in subs:
-                        try:
-                            await app.bot.send_message(
-                                int(chat_id_str),
-                                "🎰 *Билеты через 5 минут!*\nЛотерея начнётся в 21:10 МСК.",
-                                parse_mode="Markdown"
-                            )
-                        except Exception as e:
-                            print(f"[lottery] ошибка отправки {chat_id_str}: {e}")
+                    subs = await fb_get_lottery_subs()
+                    messages = [
+                        (int(cid), "🎰 *Билеты через 5 минут!*\nЛотерея начнётся в 21:10 МСК.")
+                        for cid in subs
+                    ]
+                    if messages:
+                        await _send_batch(app.bot, messages)
             else:
                 lottery_notified = False
         except Exception as e:
             print(f"[lottery_loop] ошибка: {e}")
 
-# ── post_init: запуск фоновых задач ВНУТРИ event loop бота ─
+async def cleanup_loop():
+    """Раз в час удаляет устаревшие записи из Firebase."""
+    while True:
+        await asyncio.sleep(CLEANUP_INTERVAL)
+        try:
+            now  = int(time.time())
+            data = await fb_run(_fb_get_all_data_sync)
+            deleted = 0
+            for srv, entries in data.items():
+                if not isinstance(entries, dict):
+                    continue
+                for k, v in entries.items():
+                    if v.get("expiryTs", 0) <= now:
+                        await fb_run(lambda s=srv, key=k: db.reference(f"properties/{s}/{key}").delete())
+                        deleted += 1
+            if deleted:
+                invalidate_cache()
+                print(f"[cleanup] удалено {deleted} устаревших записей")
+        except Exception as e:
+            print(f"[cleanup_loop] ошибка: {e}")
+
+# ── post_init ─────────────────────────────────────────────
 async def post_init(app):
     asyncio.create_task(notify_loop(app))
     asyncio.create_task(lottery_loop(app))
+    asyncio.create_task(cleanup_loop())
     print("Фоновые задачи запущены.")
 
 # ── Запуск ────────────────────────────────────────────────
