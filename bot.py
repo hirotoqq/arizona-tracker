@@ -371,7 +371,7 @@ async def lottery_loop(app):
     while True:
         await asyncio.sleep(30)
         now_msk = datetime.now(tz=MSK)
-        if now_msk.hour == 5 and now_msk.minute == 40:
+        if now_msk.hour == 6 and now_msk.minute == 17:
             if not lottery_notified:
                 lottery_notified = True
                 for chat_id in lottery_subscribers:
