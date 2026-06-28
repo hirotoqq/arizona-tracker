@@ -1,11 +1,10 @@
 from flask import Flask, request, jsonify
 import firebase_admin
 from firebase_admin import credentials, db
-import os, time, json
+import os, time, json, threading
 
 app = Flask(__name__)
 
-# Инициализация Firebase через переменную окружения
 if not firebase_admin._apps:
     firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
     if firebase_json:
@@ -13,39 +12,56 @@ if not firebase_admin._apps:
         cred = credentials.Certificate(cred_dict)
     else:
         cred = credentials.Certificate("serviceAccount.json")
-
     firebase_admin.initialize_app(cred, {
         "databaseURL": "https://arizona-property-tracker-default-rtdb.firebaseio.com"
     })
 
+def auto_cleanup():
+    """Удаляет записи старше 48 часов каждый час."""
+    while True:
+        time.sleep(3600)
+        try:
+            now   = int(time.time())
+            limit = now - 48 * 3600
+            ref   = db.reference("properties")
+            data  = ref.get() or {}
+            for srv, entries in data.items():
+                if not isinstance(entries, dict):
+                    continue
+                to_delete = [
+                    k for k, v in entries.items()
+                    if isinstance(v, dict) and v.get("expiryTs", 0) < limit
+                ]
+                for k in to_delete:
+                    db.reference(f"properties/{srv}/{k}").delete()
+        except Exception as e:
+            print(f"Cleanup error: {e}")
+
+# Запускаем автоочистку в фоне
+t = threading.Thread(target=auto_cleanup, daemon=True)
+t.start()
+
 @app.route("/update", methods=["POST"])
 def update():
     raw = request.get_data(as_text=False)
-    print(f"DEBUG raw={raw[:200]}")
     try:
         data = json.loads(raw.decode('utf-8', errors='replace'))
-    except Exception as e:
-        print(f"DEBUG parse error: {e}")
+    except Exception:
         return jsonify({"error": "parse error"}), 400
 
     if not data:
-        print("DEBUG: no data received")
         return jsonify({"error": "no data"}), 400
 
     server  = data.get("server")
     entries = data.get("entries", [])
 
-    print(f"DEBUG server={server} entries={entries}")
-
     if not server or not entries:
-        print("DEBUG: missing fields")
         return jsonify({"error": "missing fields"}), 400
 
     now = int(time.time())
     ref = db.reference(f"properties/{server}")
 
-    existing = ref.get() or {}
-
+    existing       = ref.get() or {}
     incoming_types = set(e["propType"] for e in entries)
 
     kept = {
@@ -67,17 +83,14 @@ def update():
     ref.set(kept)
     return jsonify({"ok": True, "written": len(entries)})
 
-
 @app.route("/list", methods=["GET"])
 def list_props():
     now           = int(time.time())
     server_filter = request.args.get("server")
     hours_max     = request.args.get("hours")
-
-    ref  = db.reference("properties")
-    data = ref.get() or {}
-
-    result = []
+    ref           = db.reference("properties")
+    data          = ref.get() or {}
+    result        = []
     for srv, entries in data.items():
         if server_filter and srv != server_filter:
             continue
@@ -97,10 +110,8 @@ def list_props():
                 "expiryTs":  expiry,
                 "hoursLeft": round(hours_left, 1),
             })
-
     result.sort(key=lambda x: x["expiryTs"])
     return jsonify(result)
-
 
 @app.route("/ping", methods=["GET"])
 def ping():
@@ -109,7 +120,6 @@ def ping():
 @app.route("/time", methods=["GET"])
 def get_time():
     return jsonify({"utc": int(time.time())})
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
