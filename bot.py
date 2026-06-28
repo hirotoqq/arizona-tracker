@@ -24,8 +24,8 @@ MSK            = timezone(timedelta(hours=3))
 STALE_HOURS    = 8
 PAGE_SIZE      = 10
 RENDER_URL     = os.environ.get("RENDER_URL", "https://arizona-tracker.onrender.com")
-HISTORY_HOURS  = 5    # история слётов за 5 часов
-DELETE_AFTER   = 86400  # удалять уведомления через 24 часа
+HISTORY_HOURS  = 5
+DELETE_AFTER   = 86400
 
 SERVER_ORDER = [
     "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg", "Saint-Rose",
@@ -36,19 +36,15 @@ SERVER_ORDER = [
     "Drake", "Space",
 ]
 
-NOTIFY_OPTIONS  = [60, 50, 40, 30, 20, 10, 5]
-LOTTERY_OPTIONS = [10, 5]
+NOTIFY_OPTIONS = [60, 50, 40, 30, 20, 10, 5]
 
-# ── Состояние пользователей ───────────────────────────────
-user_notify_minutes = {}   # { chat_id: set(minutes) }
-lottery_notify_mins = {}   # { chat_id: set(minutes) }
+user_notify_minutes = {}
+lottery_notify_mins = {}
 subscribers         = set()
 lottery_subscribers = set()
-favorite_servers    = {}   # { chat_id: set(server_names) }
 notified            = set()
-# { chat_id: [(message_id, send_ts)] }
 sent_notifications  = defaultdict(list)
-all_users           = set()   # все кто писал боту
+all_users           = set()
 
 # ── Firebase helpers ──────────────────────────────────────
 def get_all_props():
@@ -76,12 +72,11 @@ def get_all_props():
     return result
 
 def get_history():
-    """Слёты которые произошли за последние HISTORY_HOURS часов."""
-    now      = int(time.time())
-    since    = now - HISTORY_HOURS * 3600
-    ref      = db.reference("history")
-    data     = ref.get() or {}
-    result   = []
+    now   = int(time.time())
+    since = now - HISTORY_HOURS * 3600
+    ref   = db.reference("history")
+    data  = ref.get() or {}
+    result = []
     for k, v in data.items():
         if not isinstance(v, dict):
             continue
@@ -102,6 +97,11 @@ def format_last_scan(ts):
     if not ts:
         return "нет данных"
     return datetime.fromtimestamp(ts, tz=MSK).strftime("%d.%m %H:%M МСК")
+
+def prop_emoji(pt):
+    if pt == "house":    return "🏠"
+    if pt == "business": return "🏢"
+    return "❓"
 
 def prop_type_ru(pt):
     if pt == "house":    return "Дом"
@@ -130,15 +130,12 @@ def get_last_scan(server):
     return max(times) if times else None
 
 def get_server_counts(server):
-    """Возвращает {propType: count} для сервера."""
     now  = int(time.time())
     ref  = db.reference(f"properties/{server}")
     data = ref.get() or {}
     counts = defaultdict(int)
     for v in data.values():
-        if not isinstance(v, dict):
-            continue
-        if v.get("expiryTs", 0) > now:
+        if isinstance(v, dict) and v.get("expiryTs", 0) > now:
             counts[v.get("propType", "?")] += 1
     return counts
 
@@ -147,7 +144,6 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
     if not props:
         return "✅ Слётов нет или данных пока нет.", 0
 
-    # Группируем: (server, expiryTs, propType) -> count
     group = defaultdict(int)
     for p in props:
         group[(p["server"], p["expiryTs"], p["propType"])] += 1
@@ -155,7 +151,6 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
     houses = sum(1 for p in props if p["propType"] == "house")
     bizs   = sum(1 for p in props if p["propType"] == "business")
 
-    # Дедуплицируем для пагинации
     seen_keys = set()
     unique = []
     for p in props:
@@ -170,21 +165,21 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
 
     lines = [f"*{title}*"]
     stats = []
-    if houses: stats.append(f"🏠 {houses}")
-    if bizs:   stats.append(f"🏢 {bizs}")
-    if stats:  lines.append(" | ".join(stats))
+    if houses: stats.append(f"🏠×{houses}")
+    if bizs:   stats.append(f"🏢×{bizs}")
+    if stats:  lines.append(" ".join(stats))
     if total_pages > 1:
         lines.append(f"_Страница {page + 1} из {total_pages}_")
     lines.append("")
 
     for p in chunk:
-        bar     = "🔴" if p["hoursLeft"] <= 1 else "🟡" if p["hoursLeft"] <= 3 else "🟢"
-        pd_str  = f" {p['pd']}pd" if p.get("pd") else ""
-        cnt     = group[(p["server"], p["expiryTs"], p["propType"])]
-        type_ru = prop_type_ru(p["propType"])
-        cnt_str = f" ({cnt} {type_ru.lower()}{'а' if 2 <= cnt <= 4 else 'ов' if cnt > 4 else ''})" if cnt > 1 else f" ({type_ru})"
+        bar    = "🔴" if p["hoursLeft"] <= 1 else "🟡" if p["hoursLeft"] <= 3 else "🟢"
+        pd_str = f" {p['pd']}pd" if p.get("pd") else ""
+        cnt    = group[(p["server"], p["expiryTs"], p["propType"])]
+        emoji  = prop_emoji(p["propType"])
+        cnt_str = f"{emoji}×{cnt}" if cnt > 1 else emoji
         lines.append(
-            f"{bar} *{p['server']}*{cnt_str}{pd_str}\n"
+            f"{bar} *{p['server']}* {cnt_str}{pd_str}\n"
             f"    ⏰ {format_time_msk(p['expiryTs'])} МСК (через {p['hoursLeft']}ч)"
         )
     return "\n".join(lines), total_pages
@@ -193,7 +188,7 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
 def permanent_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("📋 Все слёты"),    KeyboardButton("⚠️ Ближайшие")],
-        [KeyboardButton("🗺 По серверу"),   KeyboardButton("⭐️ Избранное")],
+        [KeyboardButton("🗺 По серверу"),   KeyboardButton("👤 Профиль")],
         [KeyboardButton("🔔 Уведомления"),  KeyboardButton("🎰 Лотерея")],
         [KeyboardButton("📜 История"),      KeyboardButton("ℹ️ О боте")],
     ], resize_keyboard=True, is_persistent=True)
@@ -210,11 +205,15 @@ def _page_buttons(page, total, prefix):
 # ── /start ────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     all_users.add(update.effective_chat.id)
-    await update.message.reply_text(
-        "👋 *Arizona Property Tracker*\n\nИспользуй кнопки внизу экрана.\n\n👨‍💻 Создатель: @hiroto",
-        parse_mode="Markdown",
-        reply_markup=permanent_keyboard()
+    text = (
+        "🏙 *Arizona Property Tracker*\n\n"
+        "Следи за слётами домов и бизнесов на всех серверах Arizona RP — "
+        "в реальном времени, без лишних слов.\n\n"
+        "📡 Данные поступают от игроков с установленным скриптом.\n"
+        "🔔 Настрой уведомления и не пропусти нужный объект.\n\n"
+        "👨‍💻 @hiroto"
     )
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=permanent_keyboard())
 
 # ── Текстовые кнопки ──────────────────────────────────────
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -223,7 +222,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if t == "📋 Все слёты":     await show_list(update, ctx)
     elif t == "⚠️ Ближайшие":  await show_soon(update, ctx)
     elif t == "🗺 По серверу":  await show_servers(update, ctx)
-    elif t == "⭐️ Избранное":  await show_favorites(update, ctx)
+    elif t == "👤 Профиль":     await show_profile(update, ctx)
     elif t == "🔔 Уведомления": await show_notify_menu(update, ctx)
     elif t == "🎰 Лотерея":     await show_lottery_menu(update, ctx)
     elif t == "📜 История":     await show_history(update, ctx)
@@ -234,8 +233,7 @@ async def show_list(update, ctx, page=0):
     props = get_all_props()
     text, total = build_list_text(props, page=page)
     btns = _page_buttons(page, total, "list")
-    btns.append([InlineKeyboardButton("📤 Поделиться", callback_data="share_all")])
-    kb = InlineKeyboardMarkup(btns)
+    kb   = InlineKeyboardMarkup(btns) if btns else None
     if update.message:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
     else:
@@ -245,8 +243,7 @@ async def show_soon(update, ctx, page=0):
     props = [p for p in get_all_props() if p["hoursLeft"] <= 3]
     text, total = build_list_text(props, "⚠️ Слёты в ближайшие 3 часа", page=page)
     btns = _page_buttons(page, total, "soon")
-    btns.append([InlineKeyboardButton("📤 Поделиться", callback_data="share_soon")])
-    kb = InlineKeyboardMarkup(btns)
+    kb   = InlineKeyboardMarkup(btns) if btns else None
     if update.message:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
     else:
@@ -264,8 +261,8 @@ async def show_servers(update, ctx):
         icon   = "🔴" if is_stale(get_last_scan(s)) else "🟢"
         counts = get_server_counts(s)
         parts  = []
-        if counts["house"]:    parts.append(f"🏠{counts['house']}")
-        if counts["business"]: parts.append(f"🏢{counts['business']}")
+        if counts["house"]:    parts.append(f"🏠×{counts['house']}")
+        if counts["business"]: parts.append(f"🏢×{counts['business']}")
         cnt_str = " " + " ".join(parts) if parts else ""
         row.append(InlineKeyboardButton(f"{icon} {s}{cnt_str}", callback_data=f"srv_{s}"))
         if len(row) == 2:
@@ -277,34 +274,29 @@ async def show_servers(update, ctx):
     else:
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
-async def show_favorites(update, ctx, page=0):
-    chat_id = update.effective_chat.id
-    favs    = favorite_servers.get(chat_id, set())
-
-    if not favs:
-        servers = get_servers_ordered()
-        buttons, row = [], []
-        for s in servers:
-            row.append(InlineKeyboardButton(f"+ {s}", callback_data=f"fav_add_{s}"))
-            if len(row) == 2:
-                buttons.append(row); row = []
-        if row: buttons.append(row)
-        text = "⭐️ *Избранное пусто*\n\nВыбери серверы которые хочешь отслеживать:"
-        if update.message:
-            await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
-        else:
-            await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
-        return
-
-    props = [p for p in get_all_props() if p["server"] in favs]
-    text, total = build_list_text(props, "⭐️ Избранные серверы", page=page)
-    btns = _page_buttons(page, total, "fav")
-    btns.append([InlineKeyboardButton("✏️ Изменить избранное", callback_data="fav_edit")])
-    kb = InlineKeyboardMarkup(btns)
+async def show_profile(update, ctx):
+    chat_id  = update.effective_chat.id
+    is_sub   = chat_id in subscribers
+    is_lot   = chat_id in lottery_subscribers
+    selected = user_notify_minutes.get(chat_id, set())
+    lot_sel  = lottery_notify_mins.get(chat_id, set())
+    notify_str = ", ".join(f"{m}м" for m in sorted(selected)) if selected else "не настроено"
+    lot_str    = ", ".join(f"{m}м" for m in sorted(lot_sel)) if lot_sel else "не настроено"
+    text = (
+        f"👤 *Профиль*\n\n"
+        f"🔔 Уведомления слётов: {'✅ Вкл' if is_sub else '❌ Выкл'}\n"
+        f"⏱ Предупреждать за: {notify_str}\n\n"
+        f"🎰 Уведомления лотерея: {'✅ Вкл' if is_lot else '❌ Выкл'}\n"
+        f"⏱ За: {lot_str}"
+    )
+    buttons = [
+        [InlineKeyboardButton("🔔 Настроить уведомления", callback_data="open_notify")],
+        [InlineKeyboardButton("🎰 Настроить лотерею",     callback_data="open_lottery")],
+    ]
     if update.message:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def show_notify_menu(update, ctx):
     chat_id  = update.effective_chat.id
@@ -339,7 +331,6 @@ async def show_lottery_menu(update, ctx):
     status   = "✅ Подписан" if is_sub else "❌ Не подписан"
     btn_text = "🔕 Отписаться" if is_sub else "🔔 Подписаться"
     sel_str  = ", ".join(f"{m}м" for m in sorted(selected)) if selected else "не выбрано"
-
     buttons = [
         [InlineKeyboardButton(btn_text, callback_data="action_lottery_toggle")],
         [
@@ -362,16 +353,14 @@ async def show_history(update, ctx):
     history = get_history()
     if not history:
         txt = f"📜 *История слётов*\n\nЗа последние {HISTORY_HOURS} часов слётов не было."
-        if update.message:
-            await update.message.reply_text(txt, parse_mode="Markdown")
-        else:
-            await update.callback_query.edit_message_text(txt, parse_mode="Markdown")
+        if update.message: await update.message.reply_text(txt, parse_mode="Markdown")
+        else: await update.callback_query.edit_message_text(txt, parse_mode="Markdown")
         return
-
     lines = [f"📜 *История слётов (последние {HISTORY_HOURS}ч)*\n"]
     for v in history[:20]:
+        emoji = prop_emoji(v.get("propType", "?"))
         lines.append(
-            f"🔘 *{v.get('server','?')}* — {prop_type_ru(v.get('propType','?'))}\n"
+            f"🔘 *{v.get('server','?')}* {emoji}\n"
             f"    🕐 {format_time_msk(v.get('expiryTs', 0))} МСК"
         )
     text = "\n".join(lines)
@@ -387,38 +376,11 @@ async def show_about(update, ctx):
         f"Бот отслеживает слёты домов и бизнесов на серверах Arizona RP.\n\n"
         f"📡 Данные собираются автоматически от игроков с Lua скриптом.\n"
         f"🕐 Время отображается по МСК (UTC+3).\n"
-        f"⚠️ Данные считаются устаревшими через {STALE_HOURS} часов без скана.\n\n"
-        f"👥 Пользователей бота: *{total_users}*\n\n"
+        f"⚠️ Данные устаревают через {STALE_HOURS}ч без скана.\n\n"
+        f"👥 Пользователей: *{total_users}*\n\n"
         f"👨‍💻 Создатель: @hiroto",
         parse_mode="Markdown"
     )
-
-# ── Личный кабинет ────────────────────────────────────────
-async def show_profile(update, ctx):
-    chat_id  = update.effective_chat.id
-    is_sub   = chat_id in subscribers
-    is_lot   = chat_id in lottery_subscribers
-    selected = user_notify_minutes.get(chat_id, set())
-    lot_sel  = lottery_notify_mins.get(chat_id, set())
-    favs     = favorite_servers.get(chat_id, set())
-
-    notify_str = ", ".join(f"{m}м" for m in sorted(selected)) if selected else "не настроено"
-    lot_str    = ", ".join(f"{m}м" for m in sorted(lot_sel)) if lot_sel else "не настроено"
-    fav_str    = ", ".join(sorted(favs)) if favs else "не выбраны"
-
-    text = (
-        f"👤 *Личный кабинет*\n\n"
-        f"🔔 Уведомления слётов: {'✅' if is_sub else '❌'}\n"
-        f"⏱ Предупреждать за: {notify_str}\n\n"
-        f"🎰 Уведомления лотерея: {'✅' if is_lot else '❌'}\n"
-        f"⏱ За: {lot_str}\n\n"
-        f"⭐️ Избранные серверы:\n{fav_str}"
-    )
-    buttons = [[InlineKeyboardButton("⭐️ Изменить избранное", callback_data="fav_edit")]]
-    if update.message:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
-    else:
-        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
 # ── Callbacks ─────────────────────────────────────────────
 async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -429,15 +391,14 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("list_page_"):
         await show_list(update, ctx, page=int(data.split("_")[-1]))
-
     elif data.startswith("soon_page_"):
         await show_soon(update, ctx, page=int(data.split("_")[-1]))
-
-    elif data.startswith("fav_page_"):
-        await show_favorites(update, ctx, page=int(data.split("_")[-1]))
-
     elif data == "action_servers":
         await show_servers(update, ctx)
+    elif data == "open_notify":
+        await show_notify_menu(update, ctx)
+    elif data == "open_lottery":
+        await show_lottery_menu(update, ctx)
 
     elif data.startswith("srv_"):
         server    = data.replace("srv_", "")
@@ -447,80 +408,14 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         warn      = "⚠️ Данные устарели (скан > 8ч назад)\n\n" if is_stale(last_scan) else ""
         counts    = get_server_counts(server)
         parts     = []
-        if counts["house"]:    parts.append(f"🏠 {counts['house']}")
-        if counts["business"]: parts.append(f"🏢 {counts['business']}")
-        stats_str = "  ".join(parts)
+        if counts["house"]:    parts.append(f"🏠×{counts['house']}")
+        if counts["business"]: parts.append(f"🏢×{counts['business']}")
+        stats_str = " ".join(parts)
         text, _   = build_list_text(props, f"📋 {server}  {stats_str}", page=0)
         text      = warn + text + f"\n\n🕐 _Последний скан: {scan_str}_"
-
-        is_fav  = server in favorite_servers.get(chat_id, set())
-        fav_btn = "⭐️ Убрать из избранного" if is_fav else "☆ Добавить в избранное"
-        buttons = [
-            [InlineKeyboardButton(fav_btn, callback_data=f"fav_toggle_{server}")],
-            [InlineKeyboardButton("📤 Поделиться", callback_data=f"share_srv_{server}")],
-            [InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")],
-        ]
+        buttons   = [[InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
-    # ── Избранное
-    elif data == "fav_edit":
-        servers  = get_servers_ordered()
-        favs     = favorite_servers.get(chat_id, set())
-        buttons, row = [], []
-        for s in servers:
-            mark = "⭐️ " if s in favs else ""
-            row.append(InlineKeyboardButton(f"{mark}{s}", callback_data=f"fav_toggle_{s}"))
-            if len(row) == 2:
-                buttons.append(row); row = []
-        if row: buttons.append(row)
-        buttons.append([InlineKeyboardButton("✅ Готово", callback_data="fav_done")])
-        await query.edit_message_text(
-            "⭐️ *Избранные серверы*\n\nНажми чтобы добавить/убрать:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
-
-    elif data.startswith("fav_toggle_"):
-        server = data.replace("fav_toggle_", "")
-        favs   = favorite_servers.setdefault(chat_id, set())
-        if server in favs: favs.discard(server)
-        else: favs.add(server)
-        # Обновляем список серверов
-        servers  = get_servers_ordered()
-        buttons, row = [], []
-        for s in servers:
-            mark = "⭐️ " if s in favorite_servers.get(chat_id, set()) else ""
-            row.append(InlineKeyboardButton(f"{mark}{s}", callback_data=f"fav_toggle_{s}"))
-            if len(row) == 2:
-                buttons.append(row); row = []
-        if row: buttons.append(row)
-        buttons.append([InlineKeyboardButton("✅ Готово", callback_data="fav_done")])
-        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
-
-    elif data == "fav_add":
-        await show_favorites(update, ctx)
-
-    elif data == "fav_done":
-        await show_favorites(update, ctx)
-
-    # ── Поделиться
-    elif data == "share_all":
-        props = get_all_props()
-        text, _ = build_list_text(props, "📋 Актуальные слёты Arizona RP")
-        await ctx.bot.send_message(chat_id, f"📤 Скопируй и отправь:\n\n{text}", parse_mode="Markdown")
-
-    elif data == "share_soon":
-        props = [p for p in get_all_props() if p["hoursLeft"] <= 3]
-        text, _ = build_list_text(props, "⚠️ Ближайшие слёты Arizona RP")
-        await ctx.bot.send_message(chat_id, f"📤 Скопируй и отправь:\n\n{text}", parse_mode="Markdown")
-
-    elif data.startswith("share_srv_"):
-        server = data.replace("share_srv_", "")
-        props  = [p for p in get_all_props() if p["server"] == server]
-        text, _ = build_list_text(props, f"📋 {server} — Arizona RP")
-        await ctx.bot.send_message(chat_id, f"📤 Скопируй и отправь:\n\n{text}", parse_mode="Markdown")
-
-    # ── Уведомления
     elif data == "action_notify_toggle":
         if chat_id in subscribers: subscribers.discard(chat_id)
         else: subscribers.add(chat_id)
@@ -545,9 +440,6 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else: s.add(m)
         await show_lottery_menu(update, ctx)
 
-    elif data == "show_profile":
-        await show_profile(update, ctx)
-
 # ── Фоновые задачи ────────────────────────────────────────
 async def ping_loop():
     import httpx
@@ -561,24 +453,22 @@ async def ping_loop():
         await asyncio.sleep(600)
 
 async def delete_old_notifications(app):
-    """Удаляет уведомления старше 24 часов."""
     while True:
         await asyncio.sleep(3600)
         now = time.time()
         for chat_id, msgs in list(sent_notifications.items()):
-            to_delete = [(msg_id, ts) for msg_id, ts in msgs if now - ts > DELETE_AFTER]
-            for msg_id, ts in to_delete:
-                try:
-                    await app.bot.delete_message(chat_id, msg_id)
-                except Exception:
-                    pass
+            for msg_id, ts in msgs:
+                if now - ts > DELETE_AFTER:
+                    try:
+                        await app.bot.delete_message(chat_id, msg_id)
+                    except Exception:
+                        pass
             sent_notifications[chat_id] = [(m, t) for m, t in msgs if now - t <= DELETE_AFTER]
 
 async def save_history(props_before):
-    """Сохраняет в Firebase историю слётов."""
-    now        = int(time.time())
-    props_now  = {(p["server"], p["propType"], p["expiryTs"]) for p in get_all_props()}
-    ref        = db.reference("history")
+    now       = int(time.time())
+    props_now = {(p["server"], p["propType"], p["expiryTs"]) for p in get_all_props()}
+    ref       = db.reference("history")
     for p in props_before:
         key = (p["server"], p["propType"], p["expiryTs"])
         if key not in props_now and p["expiryTs"] <= now:
@@ -595,10 +485,12 @@ async def notify_loop(app):
     while True:
         await asyncio.sleep(CHECK_INTERVAL)
         props = get_all_props()
-
-        # Сохраняем историю
         await save_history(prev_props)
         prev_props = props
+
+        group = defaultdict(int)
+        for p in props:
+            group[(p["server"], p["expiryTs"], p["propType"])] += 1
 
         for p in props:
             for chat_id in list(subscribers):
@@ -608,19 +500,14 @@ async def notify_loop(app):
                         key = f"{chat_id}_{p['server']}_{p['propType']}_{p['expiryTs']}_{mins}"
                         if key not in notified:
                             notified.add(key)
-                            cnt = sum(
-                                1 for x in props
-                                if x["server"] == p["server"]
-                                and x["propType"] == p["propType"]
-                                and x["expiryTs"] == p["expiryTs"]
-                            )
-                            cnt_str = f" ({cnt} шт)" if cnt > 1 else ""
+                            cnt     = group[(p["server"], p["expiryTs"], p["propType"])]
+                            emoji   = prop_emoji(p["propType"])
+                            cnt_str = f"{emoji}×{cnt}" if cnt > 1 else emoji
                             text = (
                                 f"⚠️ *Скоро слёт!*\n"
-                                f"Сервер: *{p['server']}*\n"
-                                f"Тип: {prop_type_ru(p['propType'])}{cnt_str} {p['pd']}pd\n"
-                                f"Слетит в {format_time_msk(p['expiryTs'])} МСК "
-                                f"(через {p['minsLeft']} мин)"
+                                f"Сервер: *{p['server']}* {cnt_str}\n"
+                                f"{p['pd']}pd — {format_time_msk(p['expiryTs'])} МСК\n"
+                                f"Через {p['minsLeft']} мин"
                             )
                             try:
                                 msg = await app.bot.send_message(chat_id, text, parse_mode="Markdown")
@@ -655,7 +542,6 @@ async def lottery_loop(app):
                             pass
 
 async def cleanup_history():
-    """Удаляет историю старше HISTORY_HOURS * 2."""
     while True:
         await asyncio.sleep(3600)
         now   = int(time.time())
@@ -669,8 +555,7 @@ async def cleanup_history():
 # ── Запуск ────────────────────────────────────────────────
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",   cmd_start))
-    app.add_handler(CommandHandler("profile", lambda u, c: show_profile(u, c)))
+    app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
