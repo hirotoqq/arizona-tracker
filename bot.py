@@ -45,7 +45,15 @@ subscribers         = set()
 lottery_subscribers = set()
 notified            = set()
 sent_notifications  = defaultdict(list)
-all_users           = set()
+all_users = set()
+
+def load_users():
+    ref  = db.reference("users")
+    data = ref.get() or {}
+    return set(data.keys())
+
+def save_user(chat_id):
+    db.reference(f"users/{chat_id}").set(True)
 
 # ── Firebase helpers ──────────────────────────────────────
 def get_all_props():
@@ -231,6 +239,7 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── /start ────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     all_users.add(update.effective_chat.id)
+    save_user(update.effective_chat.id)
     text = (
         "🏙 *Arizona Property Tracker*\n\n"
         "Следи за слётами домов и бизнесов на всех серверах Arizona RP — "
@@ -244,6 +253,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── Текстовые кнопки ──────────────────────────────────────
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     all_users.add(update.effective_chat.id)
+    save_user(update.effective_chat.id)
     t = update.message.text
     if t == "📋 Все слёты":     await show_list(update, ctx)
     elif t == "⚠️ Ближайшие":  await show_soon(update, ctx)
@@ -580,6 +590,8 @@ async def cleanup_history():
 
 # ── Запуск ────────────────────────────────────────────────
 def main():
+    global all_users
+    all_users = load_users()
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
