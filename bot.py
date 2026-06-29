@@ -19,6 +19,7 @@ if not firebase_admin._apps:
     })
 
 BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
+ADMIN_ID = 1180660765  # замени на свой ID
 CHECK_INTERVAL = 60
 MSK            = timezone(timedelta(hours=3))
 STALE_HOURS    = 8
@@ -201,6 +202,31 @@ def _page_buttons(page, total, prefix):
     if page < total - 1:
         row.append(InlineKeyboardButton("▶️", callback_data=f"{prefix}_page_{page+1}"))
     return [row] if row else []
+
+async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return
+
+    text = " ".join(ctx.args)
+    if not text:
+        await update.message.reply_text(
+            "Использование:\n/broadcast Текст сообщения"
+        )
+        return
+
+    sent    = 0
+    failed  = 0
+    for chat_id in list(all_users):
+        try:
+            await ctx.bot.send_message(chat_id, text, parse_mode="Markdown")
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await update.message.reply_text(
+        f"✅ Отправлено: {sent}\n❌ Не доставлено: {failed}"
+    )
 
 # ── /start ────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -556,6 +582,7 @@ async def cleanup_history():
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
