@@ -246,7 +246,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "в реальном времени, без лишних слов.\n\n"
         "📡 Данные поступают от игроков с установленным скриптом.\n"
         "🔔 Настрой уведомления и не пропусти нужный объект.\n\n"
-        "👨‍💻 @hiroto"
+        "👨‍💻 @hirotoqq"
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=permanent_keyboard())
 
@@ -414,7 +414,7 @@ async def show_about(update, ctx):
         f"🕐 Время отображается по МСК (UTC+3).\n"
         f"⚠️ Данные устаревают через {STALE_HOURS}ч без скана.\n\n"
         f"👥 Пользователей: *{total_users}*\n\n"
-        f"👨‍💻 Создатель: @hiroto",
+        f"👨‍💻 Создатель: @hirotoqq",
         parse_mode="Markdown"
     )
 
