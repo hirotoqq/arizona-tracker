@@ -19,7 +19,7 @@ if not firebase_admin._apps:
     })
 
 BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID       = 1180660765
+ADMIN_ID = 1180660765  # замени на свой ID
 CHECK_INTERVAL = 60
 MSK            = timezone(timedelta(hours=3))
 STALE_HOURS    = 8
@@ -28,7 +28,6 @@ RENDER_URL     = os.environ.get("RENDER_URL", "https://arizona-tracker.onrender.
 HISTORY_HOURS  = 5
 DELETE_AFTER   = 86400
 
-# ── Серверы ───────────────────────────────────────────────
 SERVER_ORDER = [
     "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg", "Saint-Rose",
     "Mesa", "Red-Rock", "Yuma", "Surprise", "Prescott", "Glendale",
@@ -38,65 +37,6 @@ SERVER_ORDER = [
     "Drake", "Space",
 ]
 
-# ── Сезоны ловли ──────────────────────────────────────────
-# 5 таблиц, каждая — список из 32 элементов (по порядку серверов)
-# Формат: (название, эмодзи)
-SEASON_NAMES = {
-    1: ("📱По инфе",     "📱"),
-    2: ("⌨️Скорострелы", "⌨️"),
-    3: ("🚗Автогонки",   "🚗"),
-    4: ("✈️По новому",   "✈️"),
-    5: ("🏍Мотогонки",   "🏍"),
-}
-
-# Таблицы сезонов — индекс сервера (0-based) -> номер сезона
-SEASON_TABLES = [
-    # Неделя 1
-    [1,3,4,3,1,1,5,4,1,4,3,4,2,5,5,2,2,2,3,5,2,3,1,4,4,4,2,4,4,4,4,2],
-    # Неделя 2
-    [2,4,5,4,2,2,1,5,2,5,4,5,3,1,1,3,3,3,4,1,3,4,2,5,5,5,3,5,5,5,5,3],
-    # Неделя 3
-    [3,5,1,5,3,3,2,1,3,1,5,1,4,2,2,4,4,4,5,2,4,5,3,1,1,1,4,1,1,1,1,4],
-    # Неделя 4
-    [4,1,2,1,4,4,3,2,4,2,1,2,5,3,3,5,5,5,1,3,5,1,4,2,2,2,5,2,2,2,2,5],
-    # Неделя 5
-    [5,2,3,2,5,5,4,3,5,3,2,3,1,4,4,1,1,1,2,4,1,2,5,3,3,3,1,3,3,3,3,1],
-]
-
-# Первая неделя отсчёта (понедельник 30 июня 2025, 06:05 МСК = начало недели 1)
-# Считаем от известной даты начала недели 3
-# Текущая неделя 3, значит неделя 1 началась 2 недели назад
-# Понедельник 23 июня 2025 06:05 МСК
-SEASON_EPOCH = datetime(2025, 6, 23, 6, 5, 0, tzinfo=MSK)
-
-def get_current_week_index():
-    """Возвращает индекс текущей недели (0-4)."""
-    now        = datetime.now(tz=MSK)
-    delta      = now - SEASON_EPOCH
-    weeks      = int(delta.total_seconds() // (7 * 86400))
-    return weeks % 5
-
-def get_season(server_index):
-    """Возвращает (название, эмодзи) для сервера по его индексу."""
-    week_idx   = get_current_week_index()
-    season_num = SEASON_TABLES[week_idx][server_index]
-    return SEASON_NAMES[season_num]
-
-def get_season_by_name(server_name):
-    """Возвращает (название, эмодзи) для сервера по имени."""
-    if server_name in SERVER_ORDER:
-        idx = SERVER_ORDER.index(server_name)
-        return get_season(idx)
-    return ("", "")
-
-def get_next_season_change():
-    """Возвращает datetime следующей смены сезона."""
-    now      = datetime.now(tz=MSK)
-    delta    = now - SEASON_EPOCH
-    weeks    = int(delta.total_seconds() // (7 * 86400))
-    next_change = SEASON_EPOCH + timedelta(weeks=weeks + 1)
-    return next_change
-
 NOTIFY_OPTIONS = [60, 50, 40, 30, 20, 10, 5]
 
 user_notify_minutes = {}
@@ -105,17 +45,17 @@ subscribers         = set()
 lottery_subscribers = set()
 notified            = set()
 sent_notifications  = defaultdict(list)
-all_users           = set()
+all_users = set()
 
-# ── Firebase helpers ──────────────────────────────────────
 def load_users():
     ref  = db.reference("users")
     data = ref.get() or {}
-    return set(str(k) for k in data.keys())
+    return set(data.keys())
 
 def save_user(chat_id):
     db.reference(f"users/{chat_id}").set(True)
 
+# ── Firebase helpers ──────────────────────────────────────
 def get_all_props():
     now  = int(time.time())
     ref  = db.reference("properties")
@@ -213,14 +153,12 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
     if not props:
         return "✅ Слётов нет или данных пока нет.", 0
 
-    # Группируем по (server, expiryTs, propType) -> count
     group = defaultdict(int)
     for p in props:
         group[(p["server"], p["expiryTs"], p["propType"])] += 1
 
-    # Считаем общее кол-во уникальных слётов
-    houses = len(set((p["server"], p["expiryTs"]) for p in props if p["propType"] == "house"))
-    bizs   = len(set((p["server"], p["expiryTs"]) for p in props if p["propType"] == "business"))
+    houses = sum(1 for p in props if p["propType"] == "house")
+    bizs   = sum(1 for p in props if p["propType"] == "business")
 
     seen_keys = set()
     unique = []
@@ -244,18 +182,13 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
     lines.append("")
 
     for p in chunk:
-        bar     = "🔴" if p["hoursLeft"] <= 1 else "🟡" if p["hoursLeft"] <= 3 else "🟢"
-        pd_str  = f" {p['pd']}pd" if p.get("pd") else ""
-        cnt     = group[(p["server"], p["expiryTs"], p["propType"])]
-        emoji   = prop_emoji(p["propType"])
+        bar    = "🔴" if p["hoursLeft"] <= 1 else "🟡" if p["hoursLeft"] <= 3 else "🟢"
+        pd_str = f" {p['pd']}pd" if p.get("pd") else ""
+        cnt    = group[(p["server"], p["expiryTs"], p["propType"])]
+        emoji  = prop_emoji(p["propType"])
         cnt_str = f"{emoji}×{cnt}" if cnt > 1 else emoji
-
-        # Сезон сервера
-        _, season_emoji = get_season_by_name(p["server"])
-        season_str = f" ({season_emoji})" if season_emoji else ""
-
         lines.append(
-            f"{bar} *{p['server']}*{season_str} {cnt_str}{pd_str}\n"
+            f"{bar} *{p['server']}* {cnt_str}{pd_str}\n"
             f"    ⏰ {format_time_msk(p['expiryTs'])} МСК (через {p['hoursLeft']}ч)"
         )
     return "\n".join(lines), total_pages
@@ -266,8 +199,7 @@ def permanent_keyboard():
         [KeyboardButton("📋 Все слёты"),    KeyboardButton("⚠️ Ближайшие")],
         [KeyboardButton("🗺 По серверу"),   KeyboardButton("👤 Профиль")],
         [KeyboardButton("🔔 Уведомления"),  KeyboardButton("🎰 Лотерея")],
-        [KeyboardButton("📜 История"),      KeyboardButton("🎣 Сезоны ловли")],
-        [KeyboardButton("ℹ️ О боте")],
+        [KeyboardButton("📜 История"),      KeyboardButton("ℹ️ О боте")],
     ], resize_keyboard=True, is_persistent=True)
 
 def _page_buttons(page, total, prefix):
@@ -279,6 +211,31 @@ def _page_buttons(page, total, prefix):
         row.append(InlineKeyboardButton("▶️", callback_data=f"{prefix}_page_{page+1}"))
     return [row] if row else []
 
+async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return
+
+    text = " ".join(ctx.args)
+    if not text:
+        await update.message.reply_text(
+            "Использование:\n/broadcast Текст сообщения"
+        )
+        return
+
+    sent    = 0
+    failed  = 0
+    for chat_id in list(all_users):
+        try:
+            await ctx.bot.send_message(chat_id, text, parse_mode="Markdown")
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await update.message.reply_text(
+        f"✅ Отправлено: {sent}\n❌ Не доставлено: {failed}"
+    )
+
 # ── /start ────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     all_users.add(update.effective_chat.id)
@@ -289,42 +246,23 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "в реальном времени, без лишних слов.\n\n"
         "📡 Данные поступают от игроков с установленным скриптом.\n"
         "🔔 Настрой уведомления и не пропусти нужный объект.\n\n"
-        "👨‍💻 @hiroto"
+        "👨‍💻 @hirotoqq"
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=permanent_keyboard())
-
-# ── Broadcast ─────────────────────────────────────────────
-async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет доступа.")
-        return
-    text = " ".join(ctx.args)
-    if not text:
-        await update.message.reply_text("Использование:\n/broadcast Текст сообщения")
-        return
-    sent, failed = 0, 0
-    for chat_id in list(all_users):
-        try:
-            await ctx.bot.send_message(int(chat_id), text, parse_mode="Markdown")
-            sent += 1
-        except Exception:
-            failed += 1
-    await update.message.reply_text(f"✅ Отправлено: {sent}\n❌ Не доставлено: {failed}")
 
 # ── Текстовые кнопки ──────────────────────────────────────
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     all_users.add(update.effective_chat.id)
     save_user(update.effective_chat.id)
     t = update.message.text
-    if t == "📋 Все слёты":          await show_list(update, ctx)
-    elif t == "⚠️ Ближайшие":        await show_soon(update, ctx)
-    elif t == "🗺 По серверу":        await show_servers(update, ctx)
-    elif t == "👤 Профиль":           await show_profile(update, ctx)
-    elif t == "🔔 Уведомления":       await show_notify_menu(update, ctx)
-    elif t == "🎰 Лотерея":           await show_lottery_menu(update, ctx)
-    elif t == "📜 История":           await show_history(update, ctx)
-    elif t == "🎣 Сезоны ловли":      await show_seasons(update, ctx)
-    elif t == "ℹ️ О боте":            await show_about(update, ctx)
+    if t == "📋 Все слёты":     await show_list(update, ctx)
+    elif t == "⚠️ Ближайшие":  await show_soon(update, ctx)
+    elif t == "🗺 По серверу":  await show_servers(update, ctx)
+    elif t == "👤 Профиль":     await show_profile(update, ctx)
+    elif t == "🔔 Уведомления": await show_notify_menu(update, ctx)
+    elif t == "🎰 Лотерея":     await show_lottery_menu(update, ctx)
+    elif t == "📜 История":     await show_history(update, ctx)
+    elif t == "ℹ️ О боте":      await show_about(update, ctx)
 
 # ── Показ списков ─────────────────────────────────────────
 async def show_list(update, ctx, page=0):
@@ -362,8 +300,7 @@ async def show_servers(update, ctx):
         if counts["house"]:    parts.append(f"🏠×{counts['house']}")
         if counts["business"]: parts.append(f"🏢×{counts['business']}")
         cnt_str = " " + " ".join(parts) if parts else ""
-        _, s_emoji = get_season_by_name(s)
-        row.append(InlineKeyboardButton(f"{icon} {s}{cnt_str} {s_emoji}", callback_data=f"srv_{s}"))
+        row.append(InlineKeyboardButton(f"{icon} {s}{cnt_str}", callback_data=f"srv_{s}"))
         if len(row) == 2:
             buttons.append(row); row = []
     if row: buttons.append(row)
@@ -373,43 +310,12 @@ async def show_servers(update, ctx):
     else:
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
-async def show_seasons(update, ctx, page=0):
-    week_idx     = get_current_week_index()
-    week_num     = week_idx + 1
-    next_change  = get_next_season_change()
-    next_str     = next_change.strftime("%d.%m в %H:%M МСК")
-
-    lines = [
-        f"🎣 *Сезоны ловли — Неделя {week_num}*",
-        f"_Следующая смена: {next_str}_\n",
-    ]
-
-    servers_per_page = 16
-    total_pages      = 2
-    page             = max(0, min(page, total_pages - 1))
-    start            = page * servers_per_page
-    end              = start + servers_per_page
-
-    for i, srv in enumerate(SERVER_ORDER[start:end], start=start):
-        season_name, season_emoji = get_season(i)
-        num = str(i + 1).zfill(2)
-        lines.append(f"{num} - {season_emoji}{season_name}")
-
-    text    = "\n".join(lines)
-    buttons = _page_buttons(page, total_pages, "seasons")
-    kb      = InlineKeyboardMarkup(buttons) if buttons else None
-
-    if update.message:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
-    else:
-        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
-
 async def show_profile(update, ctx):
-    chat_id    = update.effective_chat.id
-    is_sub     = chat_id in subscribers
-    is_lot     = chat_id in lottery_subscribers
-    selected   = user_notify_minutes.get(chat_id, set())
-    lot_sel    = lottery_notify_mins.get(chat_id, set())
+    chat_id  = update.effective_chat.id
+    is_sub   = chat_id in subscribers
+    is_lot   = chat_id in lottery_subscribers
+    selected = user_notify_minutes.get(chat_id, set())
+    lot_sel  = lottery_notify_mins.get(chat_id, set())
     notify_str = ", ".join(f"{m}м" for m in sorted(selected)) if selected else "не настроено"
     lot_str    = ", ".join(f"{m}м" for m in sorted(lot_sel)) if lot_sel else "не настроено"
     text = (
@@ -461,7 +367,7 @@ async def show_lottery_menu(update, ctx):
     status   = "✅ Подписан" if is_sub else "❌ Не подписан"
     btn_text = "🔕 Отписаться" if is_sub else "🔔 Подписаться"
     sel_str  = ", ".join(f"{m}м" for m in sorted(selected)) if selected else "не выбрано"
-    buttons  = [
+    buttons = [
         [InlineKeyboardButton(btn_text, callback_data="action_lottery_toggle")],
         [
             InlineKeyboardButton(("✓ " if 10 in selected else "") + "10м", callback_data="lottery_min_10"),
@@ -508,7 +414,7 @@ async def show_about(update, ctx):
         f"🕐 Время отображается по МСК (UTC+3).\n"
         f"⚠️ Данные устаревают через {STALE_HOURS}ч без скана.\n\n"
         f"👥 Пользователей: *{total_users}*\n\n"
-        f"👨‍💻 Создатель: @hiroto",
+        f"👨‍💻 Создатель: @hirotoqq",
         parse_mode="Markdown"
     )
 
@@ -523,8 +429,6 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_list(update, ctx, page=int(data.split("_")[-1]))
     elif data.startswith("soon_page_"):
         await show_soon(update, ctx, page=int(data.split("_")[-1]))
-    elif data.startswith("seasons_page_"):
-        await show_seasons(update, ctx, page=int(data.split("_")[-1]))
     elif data == "action_servers":
         await show_servers(update, ctx)
     elif data == "open_notify":
@@ -543,13 +447,9 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if counts["house"]:    parts.append(f"🏠×{counts['house']}")
         if counts["business"]: parts.append(f"🏢×{counts['business']}")
         stats_str = " ".join(parts)
-
-        season_name, season_emoji = get_season_by_name(server)
-        season_str = f"  {season_emoji} {season_name}" if season_name else ""
-
-        text, _  = build_list_text(props, f"📋 {server}  {stats_str}", page=0)
-        text     = warn + text + f"\n\n🎣 Сезон: {season_str}\n🕐 _Последний скан: {scan_str}_"
-        buttons  = [[InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]]
+        text, _   = build_list_text(props, f"📋 {server}  {stats_str}", page=0)
+        text      = warn + text + f"\n\n🕐 _Последний скан: {scan_str}_"
+        buttons   = [[InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
     elif data == "action_notify_toggle":
@@ -639,11 +539,10 @@ async def notify_loop(app):
                             cnt     = group[(p["server"], p["expiryTs"], p["propType"])]
                             emoji   = prop_emoji(p["propType"])
                             cnt_str = f"{emoji}×{cnt}" if cnt > 1 else emoji
-                            _, s_emoji = get_season_by_name(p["server"])
                             text = (
                                 f"⚠️ *Скоро слёт!*\n"
-                                f"Сервер: *{p['server']}* {s_emoji}\n"
-                                f"{cnt_str} {p['pd']}pd — {format_time_msk(p['expiryTs'])} МСК\n"
+                                f"Сервер: *{p['server']}* {cnt_str}\n"
+                                f"{p['pd']}pd — {format_time_msk(p['expiryTs'])} МСК\n"
                                 f"Через {p['minsLeft']} мин"
                             )
                             try:
@@ -693,10 +592,8 @@ async def cleanup_history():
 def main():
     global all_users
     all_users = load_users()
-    print(f"Загружено пользователей: {len(all_users)}")
-
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
