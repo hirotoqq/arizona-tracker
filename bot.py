@@ -27,6 +27,7 @@ PAGE_SIZE      = 10
 RENDER_URL     = os.environ.get("RENDER_URL", "https://arizona-tracker.onrender.com")
 HISTORY_HOURS  = 5
 DELETE_AFTER   = 86400
+MASS_DROP_MIN  = 4   # минимум объектов для "массового слёта"
 
 SERVER_ORDER = [
     "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg", "Saint-Rose",
@@ -37,7 +38,6 @@ SERVER_ORDER = [
     "Drake", "Space",
 ]
 
-# ── Сезоны ────────────────────────────────────────────────
 SEASON_NAMES = {
     1: ("По инфе",     "📱"),
     2: ("Скорострелы", "⌨️"),
@@ -54,7 +54,6 @@ SEASON_TABLES = [
     [5,2,3,2,5,5,4,3,5,3,2,3,1,4,4,1,1,1,2,4,1,2,5,3,3,3,1,3,3,3,3,1],
 ]
 
-# Неделя 3 началась 6 июля 2026 в 06:05 МСК → неделя 1 = 22 июня 2026
 SEASON_EPOCH = datetime(2026, 6, 22, 6, 5, 0, tzinfo=MSK)
 
 def get_current_week_index():
@@ -74,10 +73,14 @@ def get_season_by_name(server_name):
     return ("", "")
 
 def get_next_season_change():
-    now     = datetime.now(tz=MSK)
-    delta   = now - SEASON_EPOCH
-    weeks   = int(delta.total_seconds() // (7 * 86400))
+    now   = datetime.now(tz=MSK)
+    delta = now - SEASON_EPOCH
+    weeks = int(delta.total_seconds() // (7 * 86400))
     return SEASON_EPOCH + timedelta(weeks=weeks + 1)
+
+def round_to_hour(ts):
+    """Округляет timestamp до ближайшего часа."""
+    return (ts // 3600) * 3600
 
 NOTIFY_OPTIONS = [60, 50, 40, 30, 20, 10, 5]
 
@@ -89,7 +92,6 @@ notified            = set()
 sent_notifications  = defaultdict(list)
 all_users           = set()
 
-# ── Firebase helpers ──────────────────────────────────────
 def load_users():
     ref  = db.reference("users")
     data = ref.get() or {}
@@ -115,6 +117,7 @@ def get_all_props():
                 "propType":  v.get("propType", "?"),
                 "pd":        v.get("pd", 0),
                 "expiryTs":  expiry,
+                "expiryH":   round_to_hour(expiry),  # округлённое до часа
                 "hoursLeft": round((expiry - now) / 3600, 1),
                 "minsLeft":  int((expiry - now) / 60),
                 "scanTs":    v.get("scanTs", 0),
@@ -190,21 +193,20 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
     if not props:
         return "✅ Слётов нет или данных пока нет.", 0
 
-    # Группируем: (server, expiryTs, propType) -> count
+    # Группируем по (server, expiryH, propType) — округляем до часа
     group = defaultdict(int)
     for p in props:
-        group[(p["server"], p["expiryTs"], p["propType"])] += 1
+        group[(p["server"], p["expiryH"], p["propType"])] += 1
 
-    # Считаем уникальные события слёта (не записи в БД)
-    house_events = set((p["server"], p["expiryTs"]) for p in props if p["propType"] == "house")
-    biz_events   = set((p["server"], p["expiryTs"]) for p in props if p["propType"] == "business")
-    house_total  = sum(group[(srv, ts, "house")] for srv, ts in house_events)
-    biz_total    = sum(group[(srv, ts, "business")] for srv, ts in biz_events)
+    # Суммируем общее кол-во
+    house_total = sum(v for (srv, ts, pt), v in group.items() if pt == "house")
+    biz_total   = sum(v for (srv, ts, pt), v in group.items() if pt == "business")
 
+    # Дедуплицируем по (server, expiryH, propType)
     seen_keys = set()
     unique = []
     for p in props:
-        k = (p["server"], p["expiryTs"], p["propType"])
+        k = (p["server"], p["expiryH"], p["propType"])
         if k not in seen_keys:
             seen_keys.add(k)
             unique.append(p)
@@ -223,11 +225,11 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
     lines.append("")
 
     for p in chunk:
-        bar    = "🔴" if p["hoursLeft"] <= 1 else "🟡" if p["hoursLeft"] <= 3 else "🟢"
-        pd_str = f" {p['pd']}pd" if p.get("pd") else ""
-        cnt    = group[(p["server"], p["expiryTs"], p["propType"])]
-        emoji  = prop_emoji(p["propType"])
-        cnt_str = f"{emoji}×{cnt}" if cnt > 1 else emoji
+        bar        = "🔴" if p["hoursLeft"] <= 1 else "🟡" if p["hoursLeft"] <= 3 else "🟢"
+        pd_str     = f" {p['pd']}pd" if p.get("pd") else ""
+        cnt        = group[(p["server"], p["expiryH"], p["propType"])]
+        emoji      = prop_emoji(p["propType"])
+        cnt_str    = f"{emoji}×{cnt}" if cnt > 1 else emoji
         _, s_emoji = get_season_by_name(p["server"])
         season_str = f" ({s_emoji})" if s_emoji else ""
         lines.append(
@@ -239,10 +241,11 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
 # ── Клавиатура ────────────────────────────────────────────
 def permanent_keyboard():
     return ReplyKeyboardMarkup([
-        [KeyboardButton("📋 Все слёты"),    KeyboardButton("⚠️ Ближайшие")],
-        [KeyboardButton("🗺 По серверу"),   KeyboardButton("👤 Профиль")],
-        [KeyboardButton("🔔 Уведомления"),  KeyboardButton("🎰 Лотерея")],
-        [KeyboardButton("📜 История"),      KeyboardButton("🏆 Сезоны")],
+        [KeyboardButton("📋 Все слёты"),     KeyboardButton("⚠️ Ближайшие")],
+        [KeyboardButton("💥 Массовый слёт"), KeyboardButton("🔍 Фильтр")],
+        [KeyboardButton("🗺 По серверу"),    KeyboardButton("👤 Профиль")],
+        [KeyboardButton("🔔 Уведомления"),   KeyboardButton("🎰 Лотерея")],
+        [KeyboardButton("📜 История"),       KeyboardButton("🏆 Сезоны")],
         [KeyboardButton("ℹ️ О боте")],
     ], resize_keyboard=True, is_persistent=True)
 
@@ -265,19 +268,26 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "в реальном времени, без лишних слов.\n\n"
         "📡 Данные поступают от игроков с установленным скриптом.\n"
         "🔔 Настрой уведомления и не пропусти нужный объект.\n\n"
-        "👨‍💻 @hiroto",
+        "👨‍💻 @hirotoqq",
         parse_mode="Markdown",
         reply_markup=permanent_keyboard()
     )
 
+# ── Broadcast ─────────────────────────────────────────────
 async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_ID:
         await update.message.reply_text("❌ Нет доступа.")
         return
-    text = " ".join(ctx.args)
-    if not text:
-        await update.message.reply_text("Использование:\n/broadcast Текст")
+    # Берём весь текст после команды включая переносы строк
+    full_text = update.message.text
+    # Убираем только первое слово (/broadcast)
+    idx = full_text.find(" ")
+    if idx == -1:
+        await update.message.reply_text(
+            "Использование:\n/broadcast Текст сообщения\n\nМожно использовать переносы строк."
+        )
         return
+    text = full_text[idx+1:]
     sent, failed = 0, 0
     for chat_id in list(all_users):
         try:
@@ -292,16 +302,19 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     all_users.add(update.effective_chat.id)
     save_user(update.effective_chat.id)
     t = update.message.text
-    if t == "📋 Все слёты":     await show_list(update, ctx)
-    elif t == "⚠️ Ближайшие":  await show_soon(update, ctx)
-    elif t == "🗺 По серверу":  await show_servers(update, ctx)
-    elif t == "👤 Профиль":     await show_profile(update, ctx)
-    elif t == "🔔 Уведомления": await show_notify_menu(update, ctx)
-    elif t == "🎰 Лотерея":     await show_lottery_menu(update, ctx)
-    elif t == "📜 История":     await show_history(update, ctx)
-    elif t == "🏆 Сезоны":      await show_seasons(update, ctx)
-    elif t == "ℹ️ О боте":      await show_about(update, ctx)
+    if t == "📋 Все слёты":          await show_list(update, ctx)
+    elif t == "⚠️ Ближайшие":        await show_soon(update, ctx)
+    elif t == "💥 Массовый слёт":    await show_mass_drop(update, ctx)
+    elif t == "🔍 Фильтр":           await show_filter_menu(update, ctx)
+    elif t == "🗺 По серверу":        await show_servers(update, ctx)
+    elif t == "👤 Профиль":           await show_profile(update, ctx)
+    elif t == "🔔 Уведомления":       await show_notify_menu(update, ctx)
+    elif t == "🎰 Лотерея":           await show_lottery_menu(update, ctx)
+    elif t == "📜 История":           await show_history(update, ctx)
+    elif t == "🏆 Сезоны":            await show_seasons(update, ctx)
+    elif t == "ℹ️ О боте":            await show_about(update, ctx)
 
+# ── Показ списков ─────────────────────────────────────────
 async def show_list(update, ctx, page=0):
     props = get_all_props()
     text, total = build_list_text(props, page=page)
@@ -322,6 +335,40 @@ async def show_soon(update, ctx, page=0):
     else:
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
 
+async def show_mass_drop(update, ctx, page=0):
+    """Серверы где в один пейдей падает 4+ объектов."""
+    props = get_all_props()
+    group = defaultdict(int)
+    for p in props:
+        group[(p["server"], p["expiryH"], p["propType"])] += 1
+
+    # Фильтруем только массовые слёты
+    mass_keys = {k for k, v in group.items() if v >= MASS_DROP_MIN}
+    filtered  = [p for p in props if (p["server"], p["expiryH"], p["propType"]) in mass_keys]
+
+    text, total = build_list_text(filtered, f"💥 Массовые слёты ({MASS_DROP_MIN}+)", page=page)
+    btns = _page_buttons(page, total, "mass")
+    kb   = InlineKeyboardMarkup(btns) if btns else None
+    if update.message:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
+async def show_filter_menu(update, ctx):
+    """Меню фильтра по сезонам."""
+    week_idx = get_current_week_index()
+    buttons  = []
+    for num, (name, emoji) in SEASON_NAMES.items():
+        buttons.append([InlineKeyboardButton(
+            f"{emoji} {name}",
+            callback_data=f"filter_season_{num}"
+        )])
+    text = "🔍 *Фильтр по сезону*\n\nВыбери сезон:"
+    if update.message:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
 async def show_servers(update, ctx):
     servers = get_servers_ordered()
     if not servers:
@@ -331,14 +378,15 @@ async def show_servers(update, ctx):
         return
     buttons, row = [], []
     for s in servers:
-        icon   = "🔴" if is_stale(get_last_scan(s)) else "🟢"
-        counts = get_server_counts(s)
-        parts  = []
+        icon       = "🔴" if is_stale(get_last_scan(s)) else "🟢"
+        counts     = get_server_counts(s)
+        parts      = []
         if counts["house"]:    parts.append(f"🏠×{counts['house']}")
         if counts["business"]: parts.append(f"🏢×{counts['business']}")
         cnt_str    = " " + " ".join(parts) if parts else ""
         _, s_emoji = get_season_by_name(s)
-        row.append(InlineKeyboardButton(f"{icon} {s}{cnt_str} {s_emoji}", callback_data=f"srv_{s}"))
+        season_str = f" ({s_emoji})" if s_emoji else ""
+        row.append(InlineKeyboardButton(f"{icon} {s}{cnt_str}{season_str}", callback_data=f"srv_{s}"))
         if len(row) == 2:
             buttons.append(row); row = []
     if row: buttons.append(row)
@@ -353,7 +401,6 @@ async def show_seasons(update, ctx):
     week_num    = week_idx + 1
     next_change = get_next_season_change()
     next_str    = next_change.strftime("%d.%m в %H:%M МСК")
-
     lines = [
         f"🏆 *Сезоны — Неделя {week_num}*",
         f"_Следующая смена: {next_str}_\n",
@@ -362,7 +409,6 @@ async def show_seasons(update, ctx):
         season_name, season_emoji = get_season(i)
         num = str(i + 1).zfill(2)
         lines.append(f"{num} - {season_emoji} {season_name}")
-
     text = "\n".join(lines)
     if update.message:
         await update.message.reply_text(text, parse_mode="Markdown")
@@ -471,7 +517,7 @@ async def show_about(update, ctx):
         f"🕐 Время отображается по МСК (UTC+3).\n"
         f"⚠️ Данные устаревают через {STALE_HOURS}ч без скана.\n\n"
         f"👥 Пользователей: *{total_users}*\n\n"
-        f"👨‍💻 Создатель: @hiroto",
+        f"👨‍💻 Создатель: @hirotoqq",
         parse_mode="Markdown"
     )
 
@@ -486,6 +532,8 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_list(update, ctx, page=int(data.split("_")[-1]))
     elif data.startswith("soon_page_"):
         await show_soon(update, ctx, page=int(data.split("_")[-1]))
+    elif data.startswith("mass_page_"):
+        await show_mass_drop(update, ctx, page=int(data.split("_")[-1]))
     elif data == "action_servers":
         await show_servers(update, ctx)
     elif data == "open_notify":
@@ -493,14 +541,50 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "open_lottery":
         await show_lottery_menu(update, ctx)
 
+    elif data.startswith("filter_season_"):
+        season_num = int(data.split("_")[-1])
+        season_name, season_emoji = SEASON_NAMES[season_num]
+        # Находим серверы с этим сезоном
+        week_idx = get_current_week_index()
+        servers_with_season = [
+            SERVER_ORDER[i] for i, s in enumerate(SEASON_TABLES[week_idx])
+            if s == season_num
+        ]
+        props = [p for p in get_all_props() if p["server"] in servers_with_season]
+        text, total = build_list_text(props, f"{season_emoji} {season_name}")
+        btns = _page_buttons(0, total, f"fseas{season_num}")
+        btns.append([InlineKeyboardButton("◀️ К фильтру", callback_data="back_filter")])
+        kb = InlineKeyboardMarkup(btns)
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
+    elif data.startswith("fseas"):
+        # Пагинация фильтра по сезону
+        parts      = data.split("_")
+        season_num = int(data[5:data.index("_page_")])
+        page       = int(parts[-1])
+        season_name, season_emoji = SEASON_NAMES[season_num]
+        week_idx = get_current_week_index()
+        servers_with_season = [
+            SERVER_ORDER[i] for i, s in enumerate(SEASON_TABLES[week_idx])
+            if s == season_num
+        ]
+        props = [p for p in get_all_props() if p["server"] in servers_with_season]
+        text, total = build_list_text(props, f"{season_emoji} {season_name}", page=page)
+        btns = _page_buttons(page, total, f"fseas{season_num}")
+        btns.append([InlineKeyboardButton("◀️ К фильтру", callback_data="back_filter")])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+
+    elif data == "back_filter":
+        await show_filter_menu(update, ctx)
+
     elif data.startswith("srv_"):
-        server    = data.replace("srv_", "")
-        props     = [p for p in get_all_props() if p["server"] == server]
-        last_scan = get_last_scan(server)
-        scan_str  = format_last_scan(last_scan)
-        warn      = "⚠️ Данные устарели (скан > 8ч назад)\n\n" if is_stale(last_scan) else ""
-        counts    = get_server_counts(server)
-        parts     = []
+        server             = data.replace("srv_", "")
+        props              = [p for p in get_all_props() if p["server"] == server]
+        last_scan          = get_last_scan(server)
+        scan_str           = format_last_scan(last_scan)
+        warn               = "⚠️ Данные устарели (скан > 8ч назад)\n\n" if is_stale(last_scan) else ""
+        counts             = get_server_counts(server)
+        parts              = []
         if counts["house"]:    parts.append(f"🏠×{counts['house']}")
         if counts["business"]: parts.append(f"🏢×{counts['business']}")
         stats_str          = " ".join(parts)
@@ -585,17 +669,22 @@ async def notify_loop(app):
 
         group = defaultdict(int)
         for p in props:
-            group[(p["server"], p["expiryTs"], p["propType"])] += 1
+            group[(p["server"], p["expiryH"], p["propType"])] += 1
 
+        seen_notify = set()
         for p in props:
+            grp_key = (p["server"], p["expiryH"], p["propType"])
+            if grp_key in seen_notify:
+                continue
+            seen_notify.add(grp_key)
             for chat_id in list(subscribers):
                 selected = user_notify_minutes.get(chat_id, set())
                 for mins in selected:
                     if p["minsLeft"] <= mins:
-                        key = f"{chat_id}_{p['server']}_{p['propType']}_{p['expiryTs']}_{mins}"
+                        key = f"{chat_id}_{p['server']}_{p['propType']}_{p['expiryH']}_{mins}"
                         if key not in notified:
                             notified.add(key)
-                            cnt        = group[(p["server"], p["expiryTs"], p["propType"])]
+                            cnt        = group[grp_key]
                             emoji      = prop_emoji(p["propType"])
                             cnt_str    = f"{emoji}×{cnt}" if cnt > 1 else emoji
                             _, s_emoji = get_season_by_name(p["server"])
