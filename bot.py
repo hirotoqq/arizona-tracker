@@ -336,14 +336,8 @@ async def show_soon(update, ctx, page=0):
 
 async def show_mass_drop(update, ctx, page=0):
     """Серверы где в один пейдей падает 4+ объектов."""
-    props = get_all_props()
-    group = defaultdict(int)
-    for p in props:
-        group[(p["server"], p["expiryH"], p["propType"])] += 1
-
-    # Фильтруем только массовые слёты
-    mass_keys = {k for k, v in group.items() if v >= MASS_DROP_MIN}
-    filtered  = [p for p in props if (p["server"], p["expiryH"], p["propType"]) in mass_keys]
+    props    = get_all_props()
+    filtered = [p for p in props if p.get("count", 1) >= MASS_DROP_MIN]
 
     text, total = build_list_text(filtered, f"💥 Массовые слёты ({MASS_DROP_MIN}+)", page=page)
     btns = _page_buttons(page, total, "mass")
