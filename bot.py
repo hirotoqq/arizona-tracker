@@ -104,10 +104,7 @@ def get_all_props():
     now  = int(time.time())
     ref  = db.reference("properties")
     data = ref.get() or {}
-    
-    # Группируем по (server, propType, expiryH) — считаем количество
-    groups = defaultdict(lambda: {"count": 0, "pd": 0, "expiryTs": 0, "minsLeft": 0, "hoursLeft": 0, "scanTs": 0})
-    
+    result = []
     for srv, entries in data.items():
         if not isinstance(entries, dict):
             continue
@@ -115,30 +112,17 @@ def get_all_props():
             expiry = v.get("expiryTs", 0)
             if expiry <= now:
                 continue
-            expiry_h = round_to_hour(expiry)
-            key = (srv, v.get("propType", "?"), expiry_h)
-            g = groups[key]
-            g["count"]    += 1
-            g["pd"]        = v.get("pd", 0)
-            g["scanTs"]    = max(g["scanTs"], v.get("scanTs", 0))
-            if g["expiryTs"] == 0 or expiry < g["expiryTs"]:
-                g["expiryTs"] = expiry
-                g["hoursLeft"] = round((expiry - now) / 3600, 1)
-                g["minsLeft"]  = int((expiry - now) / 60)
-
-    result = []
-    for (srv, pt, exp_h), g in groups.items():
-        result.append({
-            "server":    srv,
-            "propType":  pt,
-            "pd":        g["pd"],
-            "expiryTs":  g["expiryTs"],
-            "expiryH":   exp_h,
-            "hoursLeft": g["hoursLeft"],
-            "minsLeft":  g["minsLeft"],
-            "scanTs":    g["scanTs"],
-            "count":     g["count"],
-        })
+            result.append({
+                "server":    srv,
+                "propType":  v.get("propType", "?"),
+                "pd":        v.get("pd", 0),
+                "expiryTs":  expiry,
+                "expiryH":   expiry,
+                "hoursLeft": round((expiry - now) / 3600, 1),
+                "minsLeft":  int((expiry - now) / 60),
+                "scanTs":    v.get("scanTs", 0),
+                "count":     v.get("count", 1),
+            })
     result.sort(key=lambda x: x["expiryTs"])
     return result
 

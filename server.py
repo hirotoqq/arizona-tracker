@@ -71,14 +71,19 @@ def update():
     }
 
     for e in entries:
-        key = f"{e['propType']}_{e['expiryTs']}_{now}"
-        kept[key] = {
-            "server":   server,
-            "propType": e["propType"],
-            "pd":       e["pd"],
-            "expiryTs": e["expiryTs"],
-            "scanTs":   now,
-        }
+        # Округляем expiryTs до часа чтобы группировать дома правильно
+        expiry_h = (e["expiryTs"] // 3600) * 3600
+        key = f"{e['propType']}_{expiry_h}"
+        if key not in kept:
+            kept[key] = {
+                "server":   server,
+                "propType": e["propType"],
+                "pd":       e["pd"],
+                "expiryTs": expiry_h,
+                "scanTs":   now,
+                "count":    0,
+            }
+        kept[key]["count"] = kept[key].get("count", 0) + 1
 
     ref.set(kept)
     return jsonify({"ok": True, "written": len(entries)})
