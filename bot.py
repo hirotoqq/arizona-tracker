@@ -104,7 +104,10 @@ def get_all_props():
     now  = int(time.time())
     ref  = db.reference("properties")
     data = ref.get() or {}
-    result = []
+    
+    # Группируем по (server, propType, expiryH) — считаем количество
+    groups = defaultdict(lambda: {"count": 0, "pd": 0, "expiryTs": 0, "minsLeft": 0, "hoursLeft": 0, "scanTs": 0})
+    
     for srv, entries in data.items():
         if not isinstance(entries, dict):
             continue
@@ -112,16 +115,30 @@ def get_all_props():
             expiry = v.get("expiryTs", 0)
             if expiry <= now:
                 continue
-            result.append({
-                "server":    srv,
-                "propType":  v.get("propType", "?"),
-                "pd":        v.get("pd", 0),
-                "expiryTs":  expiry,
-                "expiryH":   round_to_hour(expiry),  # округлённое до часа
-                "hoursLeft": round((expiry - now) / 3600, 1),
-                "minsLeft":  int((expiry - now) / 60),
-                "scanTs":    v.get("scanTs", 0),
-            })
+            expiry_h = round_to_hour(expiry)
+            key = (srv, v.get("propType", "?"), expiry_h)
+            g = groups[key]
+            g["count"]    += 1
+            g["pd"]        = v.get("pd", 0)
+            g["scanTs"]    = max(g["scanTs"], v.get("scanTs", 0))
+            if g["expiryTs"] == 0 or expiry < g["expiryTs"]:
+                g["expiryTs"] = expiry
+                g["hoursLeft"] = round((expiry - now) / 3600, 1)
+                g["minsLeft"]  = int((expiry - now) / 60)
+
+    result = []
+    for (srv, pt, exp_h), g in groups.items():
+        result.append({
+            "server":    srv,
+            "propType":  pt,
+            "pd":        g["pd"],
+            "expiryTs":  g["expiryTs"],
+            "expiryH":   exp_h,
+            "hoursLeft": g["hoursLeft"],
+            "minsLeft":  g["minsLeft"],
+            "scanTs":    g["scanTs"],
+            "count":     g["count"],
+        })
     result.sort(key=lambda x: x["expiryTs"])
     return result
 
@@ -194,13 +211,8 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
         return "✅ Слётов нет или данных пока нет.", 0
 
     # Группируем по (server, expiryH, propType) — округляем до часа
-    group = defaultdict(int)
-    for p in props:
-        group[(p["server"], p["expiryH"], p["propType"])] += 1
-
-    # Суммируем общее кол-во
-    house_total = sum(v for (srv, ts, pt), v in group.items() if pt == "house")
-    biz_total   = sum(v for (srv, ts, pt), v in group.items() if pt == "business")
+    house_total = sum(p.get("count", 1) for p in props if p["propType"] == "house")
+    biz_total   = sum(p.get("count", 1) for p in props if p["propType"] == "business")
 
     # Дедуплицируем по (server, expiryH, propType)
     seen_keys = set()
@@ -227,11 +239,14 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
     for p in chunk:
         bar        = "🔴" if p["hoursLeft"] <= 1 else "🟡" if p["hoursLeft"] <= 3 else "🟢"
         pd_str     = f" {p['pd']}pd" if p.get("pd") else ""
-        cnt        = group[(p["server"], p["expiryH"], p["propType"])]
+        cnt        = p.get("count", 1)
         emoji      = prop_emoji(p["propType"])
         cnt_str    = f"{emoji}×{cnt}" if cnt > 1 else emoji
-        _, s_emoji = get_season_by_name(p["server"])
-        season_str = f" ({s_emoji})" if s_emoji else ""
+        if not p.get("_hide_season"):
+            _, s_emoji = get_season_by_name(p["server"])
+            season_str = f" ({s_emoji})" if s_emoji else ""
+        else:
+            season_str = ""
         lines.append(
             f"{bar} *{p['server']}*{season_str} {cnt_str}{pd_str}\n"
             f"    ⏰ {format_time_msk(p['expiryTs'])} МСК (через {p['hoursLeft']}ч)"
@@ -590,7 +605,12 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         stats_str          = " ".join(parts)
         season_name, s_emoji = get_season_by_name(server)
         season_str         = f"{s_emoji} {season_name}" if season_name else ""
+        # Временно убираем сезон из отображения внутри сервера
+        for p in props:
+            p["_hide_season"] = True
         text, _            = build_list_text(props, f"📋 {server}  {stats_str}", page=0)
+        for p in props:
+            p.pop("_hide_season", None)
         text               = warn + text + f"\n\n🏆 Сезон: {season_str}\n🕐 _Последний скан: {scan_str}_"
         buttons            = [[InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
