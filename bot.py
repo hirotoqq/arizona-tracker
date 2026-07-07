@@ -19,7 +19,7 @@ if not firebase_admin._apps:
     })
 
 BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
-ADMIN_ID = 1180660765  # замени на свой ID
+ADMIN_ID       = 1180660765
 CHECK_INTERVAL = 60
 MSK            = timezone(timedelta(hours=3))
 STALE_HOURS    = 8
@@ -37,6 +37,48 @@ SERVER_ORDER = [
     "Drake", "Space",
 ]
 
+# ── Сезоны ────────────────────────────────────────────────
+SEASON_NAMES = {
+    1: ("По инфе",     "📱"),
+    2: ("Скорострелы", "⌨️"),
+    3: ("Автогонки",   "🚗"),
+    4: ("По новому",   "✈️"),
+    5: ("Мотогонки",   "🏍"),
+}
+
+SEASON_TABLES = [
+    [1,3,4,3,1,1,5,4,1,4,3,4,2,5,5,2,2,2,3,5,2,3,1,4,4,4,2,4,4,4,4,2],
+    [2,4,5,4,2,2,1,5,2,5,4,5,3,1,1,3,3,3,4,1,3,4,2,5,5,5,3,5,5,5,5,3],
+    [3,5,1,5,3,3,2,1,3,1,5,1,4,2,2,4,4,4,5,2,4,5,3,1,1,1,4,1,1,1,1,4],
+    [4,1,2,1,4,4,3,2,4,2,1,2,5,3,3,5,5,5,1,3,5,1,4,2,2,2,5,2,2,2,2,5],
+    [5,2,3,2,5,5,4,3,5,3,2,3,1,4,4,1,1,1,2,4,1,2,5,3,3,3,1,3,3,3,3,1],
+]
+
+# Неделя 3 началась 6 июля 2026 в 06:05 МСК → неделя 1 = 22 июня 2026
+SEASON_EPOCH = datetime(2026, 6, 22, 6, 5, 0, tzinfo=MSK)
+
+def get_current_week_index():
+    now   = datetime.now(tz=MSK)
+    delta = now - SEASON_EPOCH
+    weeks = int(delta.total_seconds() // (7 * 86400))
+    return weeks % 5
+
+def get_season(server_index):
+    week_idx   = get_current_week_index()
+    season_num = SEASON_TABLES[week_idx][server_index]
+    return SEASON_NAMES[season_num]
+
+def get_season_by_name(server_name):
+    if server_name in SERVER_ORDER:
+        return get_season(SERVER_ORDER.index(server_name))
+    return ("", "")
+
+def get_next_season_change():
+    now     = datetime.now(tz=MSK)
+    delta   = now - SEASON_EPOCH
+    weeks   = int(delta.total_seconds() // (7 * 86400))
+    return SEASON_EPOCH + timedelta(weeks=weeks + 1)
+
 NOTIFY_OPTIONS = [60, 50, 40, 30, 20, 10, 5]
 
 user_notify_minutes = {}
@@ -45,17 +87,17 @@ subscribers         = set()
 lottery_subscribers = set()
 notified            = set()
 sent_notifications  = defaultdict(list)
-all_users = set()
+all_users           = set()
 
+# ── Firebase helpers ──────────────────────────────────────
 def load_users():
     ref  = db.reference("users")
     data = ref.get() or {}
-    return set(data.keys())
+    return set(str(k) for k in data.keys())
 
 def save_user(chat_id):
     db.reference(f"users/{chat_id}").set(True)
 
-# ── Firebase helpers ──────────────────────────────────────
 def get_all_props():
     now  = int(time.time())
     ref  = db.reference("properties")
@@ -112,11 +154,6 @@ def prop_emoji(pt):
     if pt == "business": return "🏢"
     return "❓"
 
-def prop_type_ru(pt):
-    if pt == "house":    return "Дом"
-    if pt == "business": return "Бизнес"
-    return pt
-
 def is_stale(scan_ts):
     return not scan_ts or (time.time() - scan_ts) > STALE_HOURS * 3600
 
@@ -139,9 +176,9 @@ def get_last_scan(server):
     return max(times) if times else None
 
 def get_server_counts(server):
-    now  = int(time.time())
-    ref  = db.reference(f"properties/{server}")
-    data = ref.get() or {}
+    now    = int(time.time())
+    ref    = db.reference(f"properties/{server}")
+    data   = ref.get() or {}
     counts = defaultdict(int)
     for v in data.values():
         if isinstance(v, dict) and v.get("expiryTs", 0) > now:
@@ -153,12 +190,16 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
     if not props:
         return "✅ Слётов нет или данных пока нет.", 0
 
+    # Группируем: (server, expiryTs, propType) -> count
     group = defaultdict(int)
     for p in props:
         group[(p["server"], p["expiryTs"], p["propType"])] += 1
 
-    houses = sum(1 for p in props if p["propType"] == "house")
-    bizs   = sum(1 for p in props if p["propType"] == "business")
+    # Считаем уникальные события слёта (не записи в БД)
+    house_events = set((p["server"], p["expiryTs"]) for p in props if p["propType"] == "house")
+    biz_events   = set((p["server"], p["expiryTs"]) for p in props if p["propType"] == "business")
+    house_total  = sum(group[(srv, ts, "house")] for srv, ts in house_events)
+    biz_total    = sum(group[(srv, ts, "business")] for srv, ts in biz_events)
 
     seen_keys = set()
     unique = []
@@ -174,9 +215,9 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
 
     lines = [f"*{title}*"]
     stats = []
-    if houses: stats.append(f"🏠×{houses}")
-    if bizs:   stats.append(f"🏢×{bizs}")
-    if stats:  lines.append(" ".join(stats))
+    if house_total: stats.append(f"🏠×{house_total}")
+    if biz_total:   stats.append(f"🏢×{biz_total}")
+    if stats: lines.append(" ".join(stats))
     if total_pages > 1:
         lines.append(f"_Страница {page + 1} из {total_pages}_")
     lines.append("")
@@ -187,8 +228,10 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0)
         cnt    = group[(p["server"], p["expiryTs"], p["propType"])]
         emoji  = prop_emoji(p["propType"])
         cnt_str = f"{emoji}×{cnt}" if cnt > 1 else emoji
+        _, s_emoji = get_season_by_name(p["server"])
+        season_str = f" ({s_emoji})" if s_emoji else ""
         lines.append(
-            f"{bar} *{p['server']}* {cnt_str}{pd_str}\n"
+            f"{bar} *{p['server']}*{season_str} {cnt_str}{pd_str}\n"
             f"    ⏰ {format_time_msk(p['expiryTs'])} МСК (через {p['hoursLeft']}ч)"
         )
     return "\n".join(lines), total_pages
@@ -199,7 +242,8 @@ def permanent_keyboard():
         [KeyboardButton("📋 Все слёты"),    KeyboardButton("⚠️ Ближайшие")],
         [KeyboardButton("🗺 По серверу"),   KeyboardButton("👤 Профиль")],
         [KeyboardButton("🔔 Уведомления"),  KeyboardButton("🎰 Лотерея")],
-        [KeyboardButton("📜 История"),      KeyboardButton("ℹ️ О боте")],
+        [KeyboardButton("📜 История"),      KeyboardButton("🏆 Сезоны")],
+        [KeyboardButton("ℹ️ О боте")],
     ], resize_keyboard=True, is_persistent=True)
 
 def _page_buttons(page, total, prefix):
@@ -211,44 +255,37 @@ def _page_buttons(page, total, prefix):
         row.append(InlineKeyboardButton("▶️", callback_data=f"{prefix}_page_{page+1}"))
     return [row] if row else []
 
-async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != ADMIN_ID:
-        await update.message.reply_text("❌ Нет доступа.")
-        return
-
-    text = " ".join(ctx.args)
-    if not text:
-        await update.message.reply_text(
-            "Использование:\n/broadcast Текст сообщения"
-        )
-        return
-
-    sent    = 0
-    failed  = 0
-    for chat_id in list(all_users):
-        try:
-            await ctx.bot.send_message(chat_id, text, parse_mode="Markdown")
-            sent += 1
-        except Exception:
-            failed += 1
-
-    await update.message.reply_text(
-        f"✅ Отправлено: {sent}\n❌ Не доставлено: {failed}"
-    )
-
 # ── /start ────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     all_users.add(update.effective_chat.id)
     save_user(update.effective_chat.id)
-    text = (
+    await update.message.reply_text(
         "🏙 *Arizona Property Tracker*\n\n"
         "Следи за слётами домов и бизнесов на всех серверах Arizona RP — "
         "в реальном времени, без лишних слов.\n\n"
         "📡 Данные поступают от игроков с установленным скриптом.\n"
         "🔔 Настрой уведомления и не пропусти нужный объект.\n\n"
-        "👨‍💻 @hirotoqq"
+        "👨‍💻 @hiroto",
+        parse_mode="Markdown",
+        reply_markup=permanent_keyboard()
     )
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=permanent_keyboard())
+
+async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return
+    text = " ".join(ctx.args)
+    if not text:
+        await update.message.reply_text("Использование:\n/broadcast Текст")
+        return
+    sent, failed = 0, 0
+    for chat_id in list(all_users):
+        try:
+            await ctx.bot.send_message(int(chat_id), text, parse_mode="Markdown")
+            sent += 1
+        except Exception:
+            failed += 1
+    await update.message.reply_text(f"✅ Отправлено: {sent}\n❌ Не доставлено: {failed}")
 
 # ── Текстовые кнопки ──────────────────────────────────────
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -262,9 +299,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif t == "🔔 Уведомления": await show_notify_menu(update, ctx)
     elif t == "🎰 Лотерея":     await show_lottery_menu(update, ctx)
     elif t == "📜 История":     await show_history(update, ctx)
+    elif t == "🏆 Сезоны":      await show_seasons(update, ctx)
     elif t == "ℹ️ О боте":      await show_about(update, ctx)
 
-# ── Показ списков ─────────────────────────────────────────
 async def show_list(update, ctx, page=0):
     props = get_all_props()
     text, total = build_list_text(props, page=page)
@@ -299,8 +336,9 @@ async def show_servers(update, ctx):
         parts  = []
         if counts["house"]:    parts.append(f"🏠×{counts['house']}")
         if counts["business"]: parts.append(f"🏢×{counts['business']}")
-        cnt_str = " " + " ".join(parts) if parts else ""
-        row.append(InlineKeyboardButton(f"{icon} {s}{cnt_str}", callback_data=f"srv_{s}"))
+        cnt_str    = " " + " ".join(parts) if parts else ""
+        _, s_emoji = get_season_by_name(s)
+        row.append(InlineKeyboardButton(f"{icon} {s}{cnt_str} {s_emoji}", callback_data=f"srv_{s}"))
         if len(row) == 2:
             buttons.append(row); row = []
     if row: buttons.append(row)
@@ -310,12 +348,33 @@ async def show_servers(update, ctx):
     else:
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
+async def show_seasons(update, ctx):
+    week_idx    = get_current_week_index()
+    week_num    = week_idx + 1
+    next_change = get_next_season_change()
+    next_str    = next_change.strftime("%d.%m в %H:%M МСК")
+
+    lines = [
+        f"🏆 *Сезоны — Неделя {week_num}*",
+        f"_Следующая смена: {next_str}_\n",
+    ]
+    for i, srv in enumerate(SERVER_ORDER):
+        season_name, season_emoji = get_season(i)
+        num = str(i + 1).zfill(2)
+        lines.append(f"{num} - {season_emoji} {season_name}")
+
+    text = "\n".join(lines)
+    if update.message:
+        await update.message.reply_text(text, parse_mode="Markdown")
+    else:
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown")
+
 async def show_profile(update, ctx):
-    chat_id  = update.effective_chat.id
-    is_sub   = chat_id in subscribers
-    is_lot   = chat_id in lottery_subscribers
-    selected = user_notify_minutes.get(chat_id, set())
-    lot_sel  = lottery_notify_mins.get(chat_id, set())
+    chat_id    = update.effective_chat.id
+    is_sub     = chat_id in subscribers
+    is_lot     = chat_id in lottery_subscribers
+    selected   = user_notify_minutes.get(chat_id, set())
+    lot_sel    = lottery_notify_mins.get(chat_id, set())
     notify_str = ", ".join(f"{m}м" for m in sorted(selected)) if selected else "не настроено"
     lot_str    = ", ".join(f"{m}м" for m in sorted(lot_sel)) if lot_sel else "не настроено"
     text = (
@@ -341,7 +400,6 @@ async def show_notify_menu(update, ctx):
     status   = "✅ Подписан" if is_sub else "❌ Не подписан"
     btn_text = "🔕 Отписаться" if is_sub else "🔔 Подписаться"
     sel_str  = ", ".join(f"{m}м" for m in sorted(selected)) if selected else "не выбрано"
-
     time_buttons, row = [], []
     for m in NOTIFY_OPTIONS:
         mark = "✓ " if m in selected else ""
@@ -349,7 +407,6 @@ async def show_notify_menu(update, ctx):
         if len(row) == 4:
             time_buttons.append(row); row = []
     if row: time_buttons.append(row)
-
     buttons = [
         [InlineKeyboardButton(btn_text, callback_data="action_notify_toggle")],
         *time_buttons,
@@ -367,7 +424,7 @@ async def show_lottery_menu(update, ctx):
     status   = "✅ Подписан" if is_sub else "❌ Не подписан"
     btn_text = "🔕 Отписаться" if is_sub else "🔔 Подписаться"
     sel_str  = ", ".join(f"{m}м" for m in sorted(selected)) if selected else "не выбрано"
-    buttons = [
+    buttons  = [
         [InlineKeyboardButton(btn_text, callback_data="action_lottery_toggle")],
         [
             InlineKeyboardButton(("✓ " if 10 in selected else "") + "10м", callback_data="lottery_min_10"),
@@ -414,7 +471,7 @@ async def show_about(update, ctx):
         f"🕐 Время отображается по МСК (UTC+3).\n"
         f"⚠️ Данные устаревают через {STALE_HOURS}ч без скана.\n\n"
         f"👥 Пользователей: *{total_users}*\n\n"
-        f"👨‍💻 Создатель: @hirotoqq",
+        f"👨‍💻 Создатель: @hiroto",
         parse_mode="Markdown"
     )
 
@@ -446,10 +503,12 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parts     = []
         if counts["house"]:    parts.append(f"🏠×{counts['house']}")
         if counts["business"]: parts.append(f"🏢×{counts['business']}")
-        stats_str = " ".join(parts)
-        text, _   = build_list_text(props, f"📋 {server}  {stats_str}", page=0)
-        text      = warn + text + f"\n\n🕐 _Последний скан: {scan_str}_"
-        buttons   = [[InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]]
+        stats_str          = " ".join(parts)
+        season_name, s_emoji = get_season_by_name(server)
+        season_str         = f"{s_emoji} {season_name}" if season_name else ""
+        text, _            = build_list_text(props, f"📋 {server}  {stats_str}", page=0)
+        text               = warn + text + f"\n\n🏆 Сезон: {season_str}\n🕐 _Последний скан: {scan_str}_"
+        buttons            = [[InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
     elif data == "action_notify_toggle":
@@ -536,13 +595,14 @@ async def notify_loop(app):
                         key = f"{chat_id}_{p['server']}_{p['propType']}_{p['expiryTs']}_{mins}"
                         if key not in notified:
                             notified.add(key)
-                            cnt     = group[(p["server"], p["expiryTs"], p["propType"])]
-                            emoji   = prop_emoji(p["propType"])
-                            cnt_str = f"{emoji}×{cnt}" if cnt > 1 else emoji
+                            cnt        = group[(p["server"], p["expiryTs"], p["propType"])]
+                            emoji      = prop_emoji(p["propType"])
+                            cnt_str    = f"{emoji}×{cnt}" if cnt > 1 else emoji
+                            _, s_emoji = get_season_by_name(p["server"])
                             text = (
                                 f"⚠️ *Скоро слёт!*\n"
-                                f"Сервер: *{p['server']}* {cnt_str}\n"
-                                f"{p['pd']}pd — {format_time_msk(p['expiryTs'])} МСК\n"
+                                f"Сервер: *{p['server']}* {s_emoji}\n"
+                                f"{cnt_str} {p['pd']}pd — {format_time_msk(p['expiryTs'])} МСК\n"
                                 f"Через {p['minsLeft']} мин"
                             )
                             try:
@@ -592,8 +652,10 @@ async def cleanup_history():
 def main():
     global all_users
     all_users = load_users()
+    print(f"Загружено пользователей: {len(all_users)}")
+
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
