@@ -81,13 +81,16 @@ def get_next_season_change():
 
 NOTIFY_OPTIONS = [60, 50, 40, 30, 20, 10, 5]
 
-user_notify_minutes = {}
-lottery_notify_mins = {}
-subscribers         = set()
-lottery_subscribers = set()
-notified            = set()
-sent_notifications  = defaultdict(list)
-all_users           = set()
+user_notify_minutes  = {}
+lottery_notify_mins  = {}
+subscribers          = set()
+lottery_subscribers  = set()
+season_subscribers   = set()   # подписчики на смену сезона
+notified             = set()
+sent_notifications   = defaultdict(list)
+all_users            = set()
+favorite_servers     = {}      # { chat_id: set(server_names) }
+season_notified      = False   # флаг чтобы не слать дважды
 
 def load_users():
     ref  = db.reference("users")
@@ -220,13 +223,11 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
         cnt    = p.get("count", 1)
         emoji  = prop_emoji(p["propType"])
         pd_str = f" - {p['pd']}pd" if p.get("pd") else ""
-
         if not hide_season:
             _, s_emoji = get_season_by_name(p["server"])
             season_str = f" ({s_emoji})" if s_emoji else ""
         else:
             season_str = ""
-
         lines.append(
             f"{bar} *{p['server']}*{season_str} ({emoji}×{cnt}){pd_str}\n"
             f"    ⏰ {format_time_msk(p['expiryTs'])} МСК (через {p['hoursLeft']}ч)"
@@ -238,10 +239,11 @@ def permanent_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("📋 Все слёты"),     KeyboardButton("⚠️ Ближайшие")],
         [KeyboardButton("💥 Массовый слёт"), KeyboardButton("🔍 Фильтр")],
-        [KeyboardButton("🗺 По серверу"),    KeyboardButton("👤 Профиль")],
+        [KeyboardButton("🗺 По серверу"),    KeyboardButton("⭐️ Избранное")],
         [KeyboardButton("🔔 Уведомления"),   KeyboardButton("🎰 Лотерея")],
         [KeyboardButton("📜 История"),       KeyboardButton("🏆 Сезоны")],
-        [KeyboardButton("📥 Скрипт"),        KeyboardButton("ℹ️ О боте")],
+        [KeyboardButton("👤 Профиль"),       KeyboardButton("ℹ️ О боте")],
+        [KeyboardButton("📥 Скрипт")],
     ], resize_keyboard=True, is_persistent=True)
 
 def _page_buttons(page, total, prefix):
@@ -263,9 +265,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "на всех серверах Arizona RP в реальном времени.\n\n"
         "📋 *Все слёты* — полный список актуальных слётов\n"
         "⚠️ *Ближайшие* — слёты в ближайшие 3 часа\n"
-        "💥 *Массовый слёт* — серверы где падает 4+ домов/бизнесов\n"
+        "💥 *Массовый слёт* — серверы где падает 4+ объектов\n"
         "🔍 *Фильтр* — слёты по сезону ловли\n"
         "🗺 *По серверу* — выбрать конкретный сервер\n"
+        "⭐️ *Избранное* — слёты только на твоих серверах\n"
         "🏆 *Сезоны* — таблица сезонов на неделю\n"
         "🔔 *Уведомления* — настрой оповещения о слётах\n"
         "🎰 *Лотерея* — напоминание о билетах в 21:10 МСК\n"
@@ -305,6 +308,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif t == "💥 Массовый слёт":    await show_mass_drop(update, ctx)
     elif t == "🔍 Фильтр":           await show_filter_menu(update, ctx)
     elif t == "🗺 По серверу":        await show_servers(update, ctx)
+    elif t == "⭐️ Избранное":        await show_favorites(update, ctx)
     elif t == "👤 Профиль":           await show_profile(update, ctx)
     elif t == "🔔 Уведомления":       await show_notify_menu(update, ctx)
     elif t == "🎰 Лотерея":           await show_lottery_menu(update, ctx)
@@ -380,6 +384,43 @@ async def show_servers(update, ctx):
     else:
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
+async def show_favorites(update, ctx, page=0):
+    chat_id = update.effective_chat.id
+    favs    = favorite_servers.get(chat_id, set())
+
+    if not favs:
+        # Нет избранных — показываем выбор
+        await show_favorites_edit(update, ctx)
+        return
+
+    props = [p for p in get_all_props() if p["server"] in favs]
+    text, total = build_list_text(props, "⭐️ Избранные серверы", page=page)
+    btns = _page_buttons(page, total, "fav")
+    btns.append([InlineKeyboardButton("✏️ Изменить", callback_data="fav_edit")])
+    kb = InlineKeyboardMarkup(btns)
+    if update.message:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
+async def show_favorites_edit(update, ctx):
+    chat_id = update.effective_chat.id
+    favs    = favorite_servers.get(chat_id, set())
+    servers = SERVER_ORDER
+    buttons, row = [], []
+    for s in servers:
+        mark = "⭐️ " if s in favs else ""
+        row.append(InlineKeyboardButton(f"{mark}{s}", callback_data=f"fav_toggle_{s}"))
+        if len(row) == 2:
+            buttons.append(row); row = []
+    if row: buttons.append(row)
+    buttons.append([InlineKeyboardButton("✅ Готово", callback_data="fav_done")])
+    text = "⭐️ *Избранные серверы*\n\nВыбери серверы для отслеживания:"
+    if update.message:
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+    else:
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
 async def show_seasons(update, ctx):
     week_idx    = get_current_week_index()
     week_num    = week_idx + 1
@@ -389,30 +430,42 @@ async def show_seasons(update, ctx):
     for i, srv in enumerate(SERVER_ORDER):
         season_name, season_emoji = get_season(i)
         lines.append(f"{str(i+1).zfill(2)} - {season_emoji} {season_name}")
+
+    # Кнопка подписки на смену сезона
+    is_sub  = update.effective_chat.id in season_subscribers
+    btn     = "🔕 Отписаться от смены" if is_sub else "🔔 Уведомить о смене"
+    buttons = [[InlineKeyboardButton(btn, callback_data="season_notify_toggle")]]
+
     text = "\n".join(lines)
     if update.message:
-        await update.message.reply_text(text, parse_mode="Markdown")
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
     else:
-        await update.callback_query.edit_message_text(text, parse_mode="Markdown")
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def show_profile(update, ctx):
     chat_id    = update.effective_chat.id
     is_sub     = chat_id in subscribers
     is_lot     = chat_id in lottery_subscribers
+    is_season  = chat_id in season_subscribers
     selected   = user_notify_minutes.get(chat_id, set())
     lot_sel    = lottery_notify_mins.get(chat_id, set())
+    favs       = favorite_servers.get(chat_id, set())
     notify_str = ", ".join(f"{m}м" for m in sorted(selected)) if selected else "не настроено"
     lot_str    = ", ".join(f"{m}м" for m in sorted(lot_sel)) if lot_sel else "не настроено"
+    fav_str    = ", ".join(sorted(favs)) if favs else "не выбраны"
     text = (
         f"👤 *Профиль*\n\n"
         f"🔔 Уведомления слётов: {'✅ Вкл' if is_sub else '❌ Выкл'}\n"
         f"⏱ Предупреждать за: {notify_str}\n\n"
         f"🎰 Уведомления лотерея: {'✅ Вкл' if is_lot else '❌ Выкл'}\n"
-        f"⏱ За: {lot_str}"
+        f"⏱ За: {lot_str}\n\n"
+        f"🏆 Уведомления о смене сезона: {'✅ Вкл' if is_season else '❌ Выкл'}\n\n"
+        f"⭐️ Избранные серверы:\n_{fav_str}_"
     )
     buttons = [
         [InlineKeyboardButton("🔔 Настроить уведомления", callback_data="open_notify")],
         [InlineKeyboardButton("🎰 Настроить лотерею",     callback_data="open_lottery")],
+        [InlineKeyboardButton("⭐️ Изменить избранное",    callback_data="fav_edit")],
     ]
     if update.message:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
@@ -532,12 +585,46 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_soon(update, ctx, page=int(data.split("_")[-1]))
     elif data.startswith("mass_page_"):
         await show_mass_drop(update, ctx, page=int(data.split("_")[-1]))
+    elif data.startswith("fav_page_"):
+        await show_favorites(update, ctx, page=int(data.split("_")[-1]))
     elif data == "action_servers":
         await show_servers(update, ctx)
     elif data == "open_notify":
         await show_notify_menu(update, ctx)
     elif data == "open_lottery":
         await show_lottery_menu(update, ctx)
+
+    elif data == "fav_edit":
+        await show_favorites_edit(update, ctx)
+
+    elif data.startswith("fav_toggle_"):
+        server = data.replace("fav_toggle_", "")
+        favs   = favorite_servers.setdefault(chat_id, set())
+        if server in favs: favs.discard(server)
+        else: favs.add(server)
+        # Обновляем кнопки
+        servers = SERVER_ORDER
+        buttons, row = [], []
+        for s in servers:
+            mark = "⭐️ " if s in favorite_servers.get(chat_id, set()) else ""
+            row.append(InlineKeyboardButton(f"{mark}{s}", callback_data=f"fav_toggle_{s}"))
+            if len(row) == 2:
+                buttons.append(row); row = []
+        if row: buttons.append(row)
+        buttons.append([InlineKeyboardButton("✅ Готово", callback_data="fav_done")])
+        await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup(buttons))
+
+    elif data == "fav_done":
+        await show_favorites(update, ctx)
+
+    elif data == "season_notify_toggle":
+        if chat_id in season_subscribers:
+            season_subscribers.discard(chat_id)
+            await query.answer("🔕 Отписался от смены сезона")
+        else:
+            season_subscribers.add(chat_id)
+            await query.answer("🔔 Подписался на смену сезона")
+        await show_seasons(update, ctx)
 
     elif data.startswith("filter_season_"):
         season_num = int(data.split("_")[-1])
@@ -703,6 +790,32 @@ async def lottery_loop(app):
                         except Exception:
                             pass
 
+async def season_notify_loop(app):
+    """Уведомление о смене сезона в понедельник в 06:10 МСК."""
+    global season_notified
+    while True:
+        await asyncio.sleep(30)
+        now_msk = datetime.now(tz=MSK)
+        if now_msk.weekday() == 0 and now_msk.hour == 6 and now_msk.minute == 10:
+            if not season_notified:
+                season_notified = True
+                week_idx   = get_current_week_index()
+                week_num   = week_idx + 1
+                next_week  = (week_idx + 1) % 5
+                # Строим краткую таблицу нового сезона
+                lines = [f"🏆 *Сменился сезон! Неделя {week_num}*\n"]
+                for i, srv in enumerate(SERVER_ORDER):
+                    season_name, season_emoji = SEASON_NAMES[SEASON_TABLES[next_week][i]]
+                    lines.append(f"{str(i+1).zfill(2)} - {season_emoji} {season_name}")
+                text = "\n".join(lines)
+                for chat_id in list(season_subscribers):
+                    try:
+                        await app.bot.send_message(chat_id, text, parse_mode="Markdown")
+                    except Exception:
+                        pass
+        else:
+            season_notified = False
+
 async def cleanup_history():
     while True:
         await asyncio.sleep(3600)
@@ -730,6 +843,7 @@ def main():
     asyncio.set_event_loop(loop)
     loop.create_task(notify_loop(app))
     loop.create_task(lottery_loop(app))
+    loop.create_task(season_notify_loop(app))
     loop.create_task(ping_loop())
     loop.create_task(delete_old_notifications(app))
     loop.create_task(cleanup_history())
