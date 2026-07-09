@@ -71,6 +71,9 @@ def update():
     }
 
     for e in entries:
+        # Пропускаем объекты с pd > 65
+        if e.get("pd", 0) > 65:
+            continue
         # Округляем expiryTs до часа чтобы группировать дома правильно
         expiry_h = (e["expiryTs"] // 3600) * 3600
         key = f"{e['propType']}_{expiry_h}"
