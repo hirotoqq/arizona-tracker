@@ -189,6 +189,11 @@ def get_server_counts(server):
             counts[v.get("propType", "?")] += v.get("count", 1)
     return counts
 
+def fmt_time_left(hours_left, mins_left):
+    if hours_left < 1:
+        return f"через {mins_left} мин"
+    return f"через {hours_left}ч"
+
 # ── Форматирование списка ─────────────────────────────────
 def build_list_text(props, title="📋 Актуальные слёты", page=0, hide_season=False):
     if not props:
@@ -230,7 +235,7 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
             season_str = ""
         lines.append(
             f"{bar} *{p['server']}*{season_str} ({emoji}×{cnt}){pd_str}\n"
-            f"    ⏰ {format_time_msk(p['expiryTs'])} МСК (через {p['hoursLeft']}ч)"
+            f"    ⏰ {format_time_msk(p['expiryTs'])} МСК ({fmt_time_left(p['hoursLeft'], p['minsLeft'])})"
         )
     return "\n".join(lines), total_pages
 
