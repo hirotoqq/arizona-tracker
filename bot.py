@@ -797,20 +797,21 @@ async def lottery_loop(app):
 
 async def season_notify_loop(app):
     """Уведомление о смене сезона в понедельник в 06:10 МСК."""
-    global season_notified
     while True:
         await asyncio.sleep(30)
         now_msk = datetime.now(tz=MSK)
         if now_msk.weekday() == 0 and now_msk.hour == 6 and now_msk.minute == 10:
-            if not season_notified:
-                season_notified = True
-                week_idx   = get_current_week_index()
-                week_num   = week_idx + 1
-                next_week  = (week_idx + 1) % 5
-                # Строим краткую таблицу нового сезона
+            # Проверяем в Firebase не отправляли ли уже сегодня
+            today_key = now_msk.strftime("%Y-%m-%d")
+            ref = db.reference(f"season_notified/{today_key}")
+            already = ref.get()
+            if not already:
+                ref.set(True)
+                week_idx  = get_current_week_index()
+                week_num  = week_idx + 1
                 lines = [f"🏆 *Сменился сезон! Неделя {week_num}*\n"]
                 for i, srv in enumerate(SERVER_ORDER):
-                    season_name, season_emoji = SEASON_NAMES[SEASON_TABLES[next_week][i]]
+                    season_name, season_emoji = SEASON_NAMES[SEASON_TABLES[week_idx][i]]
                     lines.append(f"{str(i+1).zfill(2)} - {season_emoji} {season_name}")
                 text = "\n".join(lines)
                 for chat_id in list(season_subscribers):
@@ -818,8 +819,6 @@ async def season_notify_loop(app):
                         await app.bot.send_message(chat_id, text, parse_mode="Markdown")
                     except Exception:
                         pass
-        else:
-            season_notified = False
 
 async def cleanup_history():
     while True:
