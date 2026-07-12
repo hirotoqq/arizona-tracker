@@ -16,8 +16,9 @@ if not firebase_admin._apps:
         "databaseURL": "https://arizona-property-tracker-default-rtdb.firebaseio.com"
     })
 
+SECRET_KEY = os.environ.get("SECRET_KEY", "")
+
 def auto_cleanup():
-    """Удаляет записи старше 48 часов каждый час."""
     while True:
         time.sleep(3600)
         try:
@@ -37,12 +38,16 @@ def auto_cleanup():
         except Exception as e:
             print(f"Cleanup error: {e}")
 
-# Запускаем автоочистку в фоне
 t = threading.Thread(target=auto_cleanup, daemon=True)
 t.start()
 
 @app.route("/update", methods=["POST"])
 def update():
+    # Проверка секретного ключа
+    secret = request.headers.get("X-Secret-Key", "")
+    if SECRET_KEY and secret != SECRET_KEY:
+        return jsonify({"error": "unauthorized"}), 403
+
     raw = request.get_data(as_text=False)
     try:
         data = json.loads(raw.decode('utf-8', errors='replace'))
@@ -58,6 +63,17 @@ def update():
     if not server or not entries:
         return jsonify({"error": "missing fields"}), 400
 
+    # Валидация сервера
+    VALID_SERVERS = {
+        "Phoenix","Tucson","Scottdale","Chandler","Brainburg","Saint-Rose",
+        "Mesa","Red-Rock","Yuma","Surprise","Prescott","Glendale",
+        "Kingman","Winslow","Payson","Gilbert","Show Low","Casa-Grande",
+        "Page","Sun-City","Queen-Creek","Sedona","Holiday","Wednesday",
+        "Yava","Faraway","Bumble Bee","Christmas","Love","Mirage","Drake","Space",
+    }
+    if server not in VALID_SERVERS:
+        return jsonify({"error": "invalid server"}), 400
+
     now = int(time.time())
     ref = db.reference(f"properties/{server}")
 
@@ -70,26 +86,34 @@ def update():
         and v.get("expiryTs", 0) > now
     }
 
+    written = 0
     for e in entries:
-        # Пропускаем объекты с pd > 65
-        if e.get("pd", 0) > 65:
+        pd = e.get("pd", 0)
+        # Пропускаем объекты с pd > 65 или pd <= 0
+        if pd > 65 or pd <= 0:
             continue
-        # Округляем expiryTs до часа чтобы группировать дома правильно
+        # Пропускаем неизвестные типы
+        if e.get("propType") not in ("house", "business"):
+            continue
         expiry_h = (e["expiryTs"] // 3600) * 3600
+        # Пропускаем если время уже прошло
+        if expiry_h <= now:
+            continue
         key = f"{e['propType']}_{expiry_h}"
         if key not in kept:
             kept[key] = {
                 "server":   server,
                 "propType": e["propType"],
-                "pd":       e["pd"],
+                "pd":       pd,
                 "expiryTs": expiry_h,
                 "scanTs":   now,
                 "count":    0,
             }
         kept[key]["count"] = kept[key].get("count", 0) + 1
+        written += 1
 
     ref.set(kept)
-    return jsonify({"ok": True, "written": len(entries)})
+    return jsonify({"ok": True, "written": written})
 
 @app.route("/list", methods=["GET"])
 def list_props():
