@@ -13,7 +13,7 @@ if not firebase_admin._apps:
     else:
         cred = credentials.Certificate("serviceAccount.json")
     firebase_admin.initialize_app(cred, {
-        "databaseURL": "https://kotak-88887-default-rtdb.firebaseio.com/"
+        "databaseURL": "https://kotak-88887-default-rtdb.firebaseio.com"
     })
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "")
