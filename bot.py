@@ -14,12 +14,8 @@ if not firebase_admin._apps:
         cred = credentials.Certificate(cred_dict)
     else:
         cred = credentials.Certificate("serviceAccount.json")
-    database_url = os.environ.get(
-        "FIREBASE_DATABASE_URL",
-        "https://arizona-property-tracker-default-rtdb.firebaseio.com"
-    )
     firebase_admin.initialize_app(cred, {
-        "databaseURL": database_url
+        "databaseURL": "https://kotak-88887-default-rtdb.firebaseio.com/"
     })
 
 BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
@@ -105,7 +101,10 @@ def save_user(chat_id):
     db.reference(f"users/{chat_id}").set(True)
 
 def get_all_props():
-    now  = int(time.time())
+    global _props_cache, _props_cache_time
+    now = int(time.time())
+    if now - _props_cache_time < CACHE_TTL and _props_cache:
+        return [p for p in _props_cache if p["expiryTs"] > now]
     ref  = db.reference("properties")
     data = ref.get() or {}
     result = []
@@ -128,6 +127,8 @@ def get_all_props():
                 "count":     v.get("count", 1),
             })
     result.sort(key=lambda x: x["expiryTs"])
+    _props_cache      = result
+    _props_cache_time = now
     return result
 
 def get_history():
