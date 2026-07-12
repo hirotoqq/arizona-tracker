@@ -14,8 +14,12 @@ if not firebase_admin._apps:
         cred = credentials.Certificate(cred_dict)
     else:
         cred = credentials.Certificate("serviceAccount.json")
+    database_url = os.environ.get(
+        "FIREBASE_DATABASE_URL",
+        "https://arizona-property-tracker-default-rtdb.firebaseio.com"
+    )
     firebase_admin.initialize_app(cred, {
-        "databaseURL": "https://arizona-property-tracker-default-rtdb.firebaseio.com"
+        "databaseURL": database_url
     })
 
 BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")

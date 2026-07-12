@@ -12,8 +12,12 @@ if not firebase_admin._apps:
         cred = credentials.Certificate(cred_dict)
     else:
         cred = credentials.Certificate("serviceAccount.json")
+    database_url = os.environ.get(
+        "FIREBASE_DATABASE_URL",
+        "https://kotak-88887-default-rtdb.firebaseio.com"
+    )
     firebase_admin.initialize_app(cred, {
-        "databaseURL": "https://arizona-property-tracker-default-rtdb.firebaseio.com"
+        "databaseURL": database_url
     })
 
 SECRET_KEY = os.environ.get("SECRET_KEY", "")
