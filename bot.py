@@ -15,7 +15,7 @@ if not firebase_admin._apps:
     else:
         cred = credentials.Certificate("serviceAccount.json")
     firebase_admin.initialize_app(cred, {
-        "databaseURL": "https://kotak-88887-default-rtdb.firebaseio.com/"
+        "databaseURL": "https://kotak-88887-default-rtdb.firebaseio.com"
     })
 
 BOT_TOKEN      = os.environ.get("BOT_TOKEN", "")
@@ -89,6 +89,9 @@ season_subscribers   = set()   # подписчики на смену сезон
 notified             = set()
 sent_notifications   = defaultdict(list)
 all_users            = set()
+_props_cache      = []
+_props_cache_time = 0
+CACHE_TTL         = 60
 favorite_servers     = {}      # { chat_id: set(server_names) }
 season_notified      = False   # флаг чтобы не слать дважды
 
