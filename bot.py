@@ -383,24 +383,35 @@ async def show_filter_menu(update, ctx):
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def show_servers(update, ctx):
+    props   = get_all_props()
     servers = get_servers_ordered()
     if not servers:
         txt = "Данных пока нет."
         if update.message: await update.message.reply_text(txt)
         else: await update.callback_query.edit_message_text(txt)
         return
+
+    # Считаем всё за один проход
+    counts_map   = defaultdict(lambda: defaultdict(int))
+    last_scan_map = defaultdict(int)
+    for p in props:
+        counts_map[p["server"]][p["propType"]] += p.get("count", 1)
+        if p["scanTs"] > last_scan_map[p["server"]]:
+            last_scan_map[p["server"]] = p["scanTs"]
+
     buttons, row = [], []
     for s in servers:
-        icon   = "🔴" if is_stale(get_last_scan(s)) else "🟢"
-        counts = get_server_counts(s)
+        stale  = is_stale(last_scan_map.get(s, 0))
+        icon   = "🔴" if stale else "🟢"
         parts  = []
-        if counts["house"]:    parts.append(f"🏠×{counts['house']}")
-        if counts["business"]: parts.append(f"🏢×{counts['business']}")
+        if counts_map[s]["house"]:    parts.append(f"🏠×{counts_map[s]['house']}")
+        if counts_map[s]["business"]: parts.append(f"🏢×{counts_map[s]['business']}")
         cnt_str = " " + " ".join(parts) if parts else ""
         row.append(InlineKeyboardButton(f"{icon} {s}{cnt_str}", callback_data=f"srv_{s}"))
         if len(row) == 2:
             buttons.append(row); row = []
     if row: buttons.append(row)
+
     text = "🗺 *Выбери сервер:*\n🟢 свежие  🔴 устаревшие"
     if update.message:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
