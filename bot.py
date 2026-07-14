@@ -100,8 +100,14 @@ def load_users():
     data = ref.get() or {}
     return set(str(k) for k in data.keys())
 
-def save_user(chat_id):
-    db.reference(f"users/{chat_id}").set(True)
+def save_user(chat_id, user=None):
+    data = {"active": True}
+    if user:
+        if user.username:
+            data["username"] = f"@{user.username}"
+        if user.full_name:
+            data["name"] = user.full_name
+    db.reference(f"users/{chat_id}").set(data)
 
 def get_all_props():
     global _props_cache, _props_cache_time
@@ -271,7 +277,7 @@ def _page_buttons(page, total, prefix):
 # ── /start ────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     all_users.add(update.effective_chat.id)
-    save_user(update.effective_chat.id)
+    save_user(update.effective_chat.id, update.effective_user)
     text = (
         "🏙 *Arizona Property Tracker*\n\n"
         "Добро пожаловать! Этот бот помогает отслеживать слёты домов и бизнесов "
@@ -314,7 +320,7 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── Текстовые кнопки ──────────────────────────────────────
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     all_users.add(update.effective_chat.id)
-    save_user(update.effective_chat.id)
+    save_user(update.effective_chat.id, update.effective_user)
     t = update.message.text
     if t == "📋 Все слёты":          await show_list(update, ctx)
     elif t == "⚠️ Ближайшие":        await show_soon(update, ctx)
