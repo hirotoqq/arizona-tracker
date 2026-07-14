@@ -232,11 +232,11 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
     page        = max(0, min(page, total_pages - 1))
     chunk       = unique[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
 
+    lines = [f"*{title}*"]
     stats = []
     if house_total: stats.append(f"🏠×{house_total}")
     if biz_total:   stats.append(f"🏢×{biz_total}")
-    stats_str = "  " + " ".join(stats) if stats else ""
-    lines = [f"*{title}*{stats_str}"]
+    if stats: lines.append(" ".join(stats))
     if total_pages > 1:
         lines.append(f"_Страница {page + 1} из {total_pages}_")
     lines.append("")
@@ -688,7 +688,7 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         stats_str          = " ".join(parts)
         season_name, s_emoji = get_season_by_name(server)
         season_str         = f"{s_emoji} {season_name}" if season_name else ""
-        text, _            = build_list_text(props, f"📋 {server}  {stats_str}", page=0, hide_season=True)
+        text, _            = build_list_text(props, f"📋 {server}", page=0, hide_season=True)
         text               = warn + text + f"\n\n🏆 Сезон: {season_str}\n🕐 _Последний скан: {scan_str}_"
         buttons            = [[InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]]
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
