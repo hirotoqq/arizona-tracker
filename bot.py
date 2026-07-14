@@ -232,11 +232,11 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
     page        = max(0, min(page, total_pages - 1))
     chunk       = unique[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
 
-    lines = [f"*{title}*"]
     stats = []
     if house_total: stats.append(f"🏠×{house_total}")
     if biz_total:   stats.append(f"🏢×{biz_total}")
-    if stats: lines.append(" ".join(stats))
+    stats_str = "  " + " ".join(stats) if stats else ""
+    lines = [f"*{title}*{stats_str}"]
     if total_pages > 1:
         lines.append(f"_Страница {page + 1} из {total_pages}_")
     lines.append("")
