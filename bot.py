@@ -101,7 +101,11 @@ def load_users():
     return set(str(k) for k in data.keys())
 
 def save_user(chat_id, user=None):
-    data = {"active": True}
+    now_msk = datetime.now(tz=MSK).strftime("%d.%m.%Y %H:%M МСК")
+    data = {
+        "active":    True,
+        "last_seen": now_msk,
+    }
     if user:
         if user.username:
             data["username"] = f"@{user.username}"
