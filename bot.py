@@ -89,6 +89,16 @@ season_subscribers   = set()   # подписчики на смену сезон
 notified             = set()
 sent_notifications   = defaultdict(list)
 all_users            = set()
+banned_users = set()   # { chat_id }
+
+def load_banned():
+    ref  = db.reference("banned")
+    data = ref.get() or {}
+    return set(int(k) for k in data.keys())
+
+def is_banned(chat_id):
+    return int(chat_id) in banned_users
+    
 _props_cache      = []
 _props_cache_time = 0
 CACHE_TTL         = 60
@@ -281,6 +291,9 @@ def _page_buttons(page, total, prefix):
 
 # ── /start ────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if is_banned(update.effective_chat.id):
+        await update.message.reply_text("⛔️ Вы заблокированы и не можете использовать этого бота.")
+        return
     all_users.add(update.effective_chat.id)
     save_user(update.effective_chat.id, update.effective_user)
     text = (
@@ -326,8 +339,78 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             failed += 1
     await update.message.reply_text(f"✅ Отправлено: {sent}\n❌ Не доставлено: {failed}")
 
-# ── Текстовые кнопки ──────────────────────────────────────
+async def cmd_ban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return
+    args = ctx.args
+    if not args:
+        await update.message.reply_text("Использование:\n/ban ID причина")
+        return
+    try:
+        uid    = int(args[0])
+        reason = " ".join(args[1:]) if len(args) > 1 else "не указана"
+    except ValueError:
+        await update.message.reply_text("❌ Неверный ID.")
+        return
+
+    now_msk = datetime.now(tz=MSK).strftime("%d.%m.%Y %H:%M МСК")
+    banned_users.add(uid)
+    db.reference(f"banned/{uid}").set({
+        "reason":  reason,
+        "date":    now_msk,
+    })
+
+    # Пробуем получить username
+    try:
+        chat = await ctx.bot.get_chat(uid)
+        name = f"@{chat.username}" if chat.username else chat.full_name
+    except Exception:
+        name = str(uid)
+
+    await update.message.reply_text(
+        f"🚫 Пользователь {uid} ({name}) заблокирован.\n"
+        f"Причина: {reason}"
+    )
+
+async def cmd_unban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return
+    args = ctx.args
+    if not args:
+        await update.message.reply_text("Использование:\n/unban ID")
+        return
+    try:
+        uid = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Неверный ID.")
+        return
+
+    banned_users.discard(uid)
+    db.reference(f"banned/{uid}").delete()
+    await update.message.reply_text(f"✅ Пользователь {uid} разблокирован.")
+
+async def cmd_banlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return
+    ref  = db.reference("banned")
+    data = ref.get() or {}
+    if not data:
+        await update.message.reply_text("✅ Забаненных пользователей нет.")
+        return
+    lines = ["🚫 *Забаненные пользователи:*\n"]
+    for i, (uid, v) in enumerate(data.items(), 1):
+        reason = v.get("reason", "не указана") if isinstance(v, dict) else "не указана"
+        date   = v.get("date", "неизвестно") if isinstance(v, dict) else "неизвестно"
+        lines.append(f"{i}. `{uid}`\n   Причина: {reason}\n   Дата: {date}")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if is_banned(update.effective_chat.id):
+        await update.message.reply_text("⛔️ Вы заблокированы и не можете использовать этого бота.")
+        return
     all_users.add(update.effective_chat.id)
     save_user(update.effective_chat.id, update.effective_user)
     t = update.message.text
@@ -856,8 +939,9 @@ async def cleanup_history():
 
 # ── Запуск ────────────────────────────────────────────────
 def main():
-    global all_users
-    all_users = load_users()
+    global all_users, banned_users
+    all_users    = load_users()
+    banned_users = load_banned()
     print(f"Загружено пользователей: {len(all_users)}")
 
     app = Application.builder().token(BOT_TOKEN).build()
@@ -865,6 +949,9 @@ def main():
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(CommandHandler("ban",      cmd_ban))
+    app.add_handler(CommandHandler("unban",    cmd_unban))
+    app.add_handler(CommandHandler("banlist",  cmd_banlist))
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
