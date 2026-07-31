@@ -287,19 +287,19 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
                 pt_ru  = "Дома" if pt == "house" else "Бизнесы"
                 lines.append(f"   │  └─📍 {pt_ru}:")
 
-                for ii, item in enumerate(items):
-                    is_last_item = ii == len(items) - 1
-                    item_prefix  = "   │     └─" if is_last_item else "   │     ├─"
+            for ii, item in enumerate(items):
+                is_last_item = ii == len(items) - 1
+                item_prefix  = "      └─" if is_last_item else "      ├─"
                     prop_id      = item.get("propId")
                     pos          = item.get("pos")
                     pd           = item.get("pd", 0)
 
                     if prop_id:
-                        lines.append(f"{item_prefix} id {prop_id} (PD: {pd})")
+                        lines.append(f"{item_prefix}id {prop_id} (PayDay: {pd}) - Застраховано")
                     elif pos:
-                        lines.append(f"{item_prefix} pos {pos} (PD: {pd})")
+                        lines.append(f"{item_prefix}pos {pos} (PayDay: {pd}) - Застраховано")
                     else:
-                        lines.append(f"{item_prefix} PD: {pd}")
+                        lines.append(f"{item_prefix}(PayDay: {pd}) - Застраховано")
 
         lines.append("")
 
