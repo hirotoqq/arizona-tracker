@@ -265,10 +265,19 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
         lines.append(f"_Страница {page + 1} из {total_pages}_")
     lines.append("")
 
+    # Переключаемся на HTML
+    header = f"<b>{title}</b>\n"
+    stats_str = " ".join(stats) if stats else ""
+    if stats_str:
+        header += f"{stats_str}\n"
+    if total_pages > 1 and not no_pages:
+        header += f"<i>Страница {page + 1} из {total_pages}</i>\n"
+
+    tree_lines = []
     for ts in sorted(chunk_times.keys()):
         servers_in_time = chunk_times[ts]
         time_str = format_time_msk(ts)
-        lines.append(f"⚡️ Слёты в {time_str}:")
+        tree_lines.append(f"⚡️ Слёты в {time_str}:")
 
         for si, srv in enumerate(servers_in_time):
             is_last_srv = si == len(servers_in_time) - 1
@@ -280,12 +289,12 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
             else:
                 season_str = ""
 
-            lines.append(f"`{srv_prefix}`🌐 Сервер {srv}{season_str}")
+            tree_lines.append(f"{srv_prefix}🌐 Сервер {srv}{season_str}")
 
             for pt, items in by_time[ts][srv].items():
                 pt_ru = "Дома" if pt == "house" else "Бизнесы"
                 ind   = "   │  " if not is_last_srv else "      "
-                lines.append(f"`{ind}`📍 {pt_ru}:")
+                tree_lines.append(f"{ind}└─📍 {pt_ru}:")
 
                 for ii, item in enumerate(items):
                     is_last_item = ii == len(items) - 1
@@ -296,13 +305,16 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
                     pd      = item.get("pd", 0)
 
                     if prop_id:
-                        lines.append(f"`{item_prefix}id {prop_id} (PayDay: {pd})`")
+                        tree_lines.append(f"{item_prefix}id {prop_id} (PayDay: {pd})")
                     elif pos:
-                        lines.append(f"`{item_prefix}pos {pos} (PayDay: {pd})`")
+                        tree_lines.append(f"{item_prefix}pos {pos} (PayDay: {pd})")
                     else:
-                        lines.append(f"`{item_prefix}(PayDay: {pd})`")
+                        tree_lines.append(f"{item_prefix}(PayDay: {pd})")
 
-        lines.append("")
+        tree_lines.append("")
+
+    block = "<blockquote>" + "\n".join(tree_lines) + "</blockquote>"
+    return header + "\n" + block, total_pages
 
     return "\n".join(lines), total_pages
 
