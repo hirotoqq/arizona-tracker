@@ -149,6 +149,8 @@ def get_all_props():
                 "minsLeft":  int((expiry - now) / 60),
                 "scanTs":    v.get("scanTs", 0),
                 "count":     v.get("count", 1),
+                "propId":    v.get("propId"),
+                "pos":       v.get("pos"),
             })
     result.sort(key=lambda x: x["expiryTs"])
     _props_cache      = result
@@ -231,17 +233,29 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
     house_total = sum(p.get("count", 1) for p in props if p["propType"] == "house")
     biz_total   = sum(p.get("count", 1) for p in props if p["propType"] == "business")
 
-    seen_keys = set()
-    unique = []
+    # Группируем по времени слёта -> сервер -> тип
+    from collections import defaultdict
+    by_time = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for p in props:
-        k = (p["server"], p["expiryH"], p["propType"])
-        if k not in seen_keys:
-            seen_keys.add(k)
-            unique.append(p)
+        by_time[p["expiryTs"]][p["server"]][p["propType"]].append(p)
 
-    total_pages = max(1, (len(unique) + PAGE_SIZE - 1) // PAGE_SIZE)
+    # Уникальные временные слоты
+    time_slots = sorted(by_time.keys())
+
+    # Для пагинации считаем блоки (один блок = один сервер в одном времени)
+    blocks = []
+    for ts in time_slots:
+        for srv in sorted(by_time[ts].keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999):
+            blocks.append((ts, srv))
+
+    total_pages = max(1, (len(blocks) + PAGE_SIZE - 1) // PAGE_SIZE)
     page        = max(0, min(page, total_pages - 1))
-    chunk       = unique[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    chunk_blocks = blocks[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+
+    # Группируем чанк по времени
+    chunk_times = defaultdict(list)
+    for ts, srv in chunk_blocks:
+        chunk_times[ts].append(srv)
 
     lines = [f"*{title}*"]
     stats = []
@@ -252,20 +266,43 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
         lines.append(f"_Страница {page + 1} из {total_pages}_")
     lines.append("")
 
-    for p in chunk:
-        bar    = "🔴" if p["hoursLeft"] <= 1 else "🟡" if p["hoursLeft"] <= 3 else "🟢"
-        cnt    = p.get("count", 1)
-        emoji  = prop_emoji(p["propType"])
-        pd_str = f" - {p['pd']}pd" if p.get("pd") else ""
-        if not hide_season:
-            _, s_emoji = get_season_by_name(p["server"])
-            season_str = f" ({s_emoji})" if s_emoji else ""
-        else:
-            season_str = ""
-        lines.append(
-            f"{bar} *{p['server']}*{season_str} ({emoji}×{cnt}){pd_str}\n"
-            f"    ⏰ {format_time_msk(p['expiryTs'])} МСК ({fmt_time_left(p['hoursLeft'], p['minsLeft'])})"
-        )
+    for ts in sorted(chunk_times.keys()):
+        servers_in_time = chunk_times[ts]
+        time_str = format_time_msk(ts)
+        lines.append(f"└─⚡️ *Слёты в {time_str} МСК:*")
+
+        for si, srv in enumerate(servers_in_time):
+            is_last_srv = si == len(servers_in_time) - 1
+            srv_prefix  = "   └─" if is_last_srv else "   ├─"
+
+            if not hide_season:
+                _, s_emoji = get_season_by_name(srv)
+                season_str = f" {s_emoji}" if s_emoji else ""
+            else:
+                season_str = ""
+
+            lines.append(f"{srv_prefix}🌐 *{srv}*{season_str}")
+
+            for pt, items in by_time[ts][srv].items():
+                pt_ru  = "Дома" if pt == "house" else "Бизнесы"
+                lines.append(f"   │  └─📍 {pt_ru}:")
+
+                for ii, item in enumerate(items):
+                    is_last_item = ii == len(items) - 1
+                    item_prefix  = "   │     └─" if is_last_item else "   │     ├─"
+                    prop_id      = item.get("propId")
+                    pos          = item.get("pos")
+                    pd           = item.get("pd", 0)
+
+                    if prop_id:
+                        lines.append(f"{item_prefix} id {prop_id} (PD: {pd})")
+                    elif pos:
+                        lines.append(f"{item_prefix} pos {pos} (PD: {pd})")
+                    else:
+                        lines.append(f"{item_prefix} PD: {pd}")
+
+        lines.append("")
+
     return "\n".join(lines), total_pages
 
 # ── Клавиатура ────────────────────────────────────────────
