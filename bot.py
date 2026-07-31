@@ -225,34 +225,33 @@ def fmt_time_left(hours_left, mins_left):
         return f"через {mins_left} мин"
     return f"через {hours_left}ч"
 
-# ── Форматирование списка ─────────────────────────────────
-def build_list_text(props, title="📋 Актуальные слёты", page=0, hide_season=False):
+def build_list_text(props, title="📋 Актуальные слёты", page=0, hide_season=False, no_pages=False):
     if not props:
         return "✅ Слётов нет или данных пока нет.", 0
 
     house_total = sum(p.get("count", 1) for p in props if p["propType"] == "house")
     biz_total   = sum(p.get("count", 1) for p in props if p["propType"] == "business")
 
-    # Группируем по времени слёта -> сервер -> тип
     from collections import defaultdict
     by_time = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for p in props:
         by_time[p["expiryTs"]][p["server"]][p["propType"]].append(p)
 
-    # Уникальные временные слоты
     time_slots = sorted(by_time.keys())
 
-    # Для пагинации считаем блоки (один блок = один сервер в одном времени)
     blocks = []
     for ts in time_slots:
         for srv in sorted(by_time[ts].keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999):
             blocks.append((ts, srv))
 
-    total_pages = max(1, (len(blocks) + PAGE_SIZE - 1) // PAGE_SIZE)
-    page        = max(0, min(page, total_pages - 1))
-    chunk_blocks = blocks[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    if no_pages:
+        total_pages  = 1
+        chunk_blocks = blocks
+    else:
+        total_pages  = max(1, (len(blocks) + PAGE_SIZE - 1) // PAGE_SIZE)
+        page         = max(0, min(page, total_pages - 1))
+        chunk_blocks = blocks[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
 
-    # Группируем чанк по времени
     chunk_times = defaultdict(list)
     for ts, srv in chunk_blocks:
         chunk_times[ts].append(srv)
@@ -262,18 +261,18 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
     if house_total: stats.append(f"🏠×{house_total}")
     if biz_total:   stats.append(f"🏢×{biz_total}")
     if stats: lines.append(" ".join(stats))
-    if total_pages > 1:
+    if total_pages > 1 and not no_pages:
         lines.append(f"_Страница {page + 1} из {total_pages}_")
     lines.append("")
 
     for ts in sorted(chunk_times.keys()):
         servers_in_time = chunk_times[ts]
         time_str = format_time_msk(ts)
-        lines.append(f"└─⚡️ *Слёты в {time_str} МСК:*")
+        lines.append(f"`└─⚡️ Слёты в {time_str} МСК:`")
 
         for si, srv in enumerate(servers_in_time):
             is_last_srv = si == len(servers_in_time) - 1
-            srv_prefix  = "   └─" if is_last_srv else "   ├─"
+            srv_prefix  = "`   └─`" if is_last_srv else "`   ├─`"
 
             if not hide_season:
                 _, s_emoji = get_season_by_name(srv)
@@ -284,22 +283,22 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
             lines.append(f"{srv_prefix}🌐 *{srv}*{season_str}")
 
             for pt, items in by_time[ts][srv].items():
-                pt_ru  = "Дома" if pt == "house" else "Бизнесы"
-                lines.append(f"   │  └─📍 {pt_ru}:")
+                pt_ru = "Дома" if pt == "house" else "Бизнесы"
+                lines.append(f"`   │  └─📍 {pt_ru}:`")
 
-            for ii, item in enumerate(items):
-                is_last_item = ii == len(items) - 1
-                item_prefix  = "      └─" if is_last_item else "      ├─"
-                    prop_id      = item.get("propId")
-                    pos          = item.get("pos")
-                    pd           = item.get("pd", 0)
+                for ii, item in enumerate(items):
+                    is_last_item = ii == len(items) - 1
+                    item_prefix  = "`         └─`" if is_last_item else "`         ├─`"
+                    prop_id = item.get("propId")
+                    pos     = item.get("pos")
+                    pd      = item.get("pd", 0)
 
                     if prop_id:
-                        lines.append(f"{item_prefix}id {prop_id} (PayDay: {pd}) - Застраховано")
+                        lines.append(f"{item_prefix}` id {prop_id} (PD: {pd})`")
                     elif pos:
-                        lines.append(f"{item_prefix}pos {pos} (PayDay: {pd}) - Застраховано")
+                        lines.append(f"{item_prefix}` pos {pos} (PD: {pd})`")
                     else:
-                        lines.append(f"{item_prefix}(PayDay: {pd}) - Застраховано")
+                        lines.append(f"{item_prefix}` PD: {pd}`")
 
         lines.append("")
 
@@ -478,9 +477,8 @@ async def show_list(update, ctx, page=0):
 
 async def show_soon(update, ctx, page=0):
     props = [p for p in get_all_props() if p["hoursLeft"] <= 3]
-    text, total = build_list_text(props, "⚠️ Слёты в ближайшие 3 часа", page=page)
-    btns = _page_buttons(page, total, "soon")
-    kb   = InlineKeyboardMarkup(btns) if btns else None
+    text, total = build_list_text(props, "⚠️ Слёты в ближайшие 3 часа", no_pages=True)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄", callback_data="soon_refresh")]]) 
     if update.message:
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
     else:
@@ -731,6 +729,8 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_list(update, ctx, page=int(data.split("_")[-1]))
     elif data.startswith("soon_page_"):
         await show_soon(update, ctx, page=int(data.split("_")[-1]))
+    elif data == "soon_refresh":
+        await show_soon(update, ctx)
     elif data.startswith("mass_page_"):
         await show_mass_drop(update, ctx, page=int(data.split("_")[-1]))
     elif data.startswith("fav_page_"):
