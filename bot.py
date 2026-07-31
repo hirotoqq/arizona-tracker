@@ -272,7 +272,7 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
 
         for si, srv in enumerate(servers_in_time):
             is_last_srv = si == len(servers_in_time) - 1
-            srv_prefix  = "`   └─`" if is_last_srv else "`   ├─`"
+            srv_prefix  = "   └─" if is_last_srv else "   ├─"
 
             if not hide_season:
                 _, s_emoji = get_season_by_name(srv)
@@ -280,25 +280,27 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
             else:
                 season_str = ""
 
-            lines.append(f"{srv_prefix}🌐 *{srv}*{season_str}")
+            lines.append(f"`{srv_prefix}🌐 {srv}{season_str}`")
 
             for pt, items in by_time[ts][srv].items():
                 pt_ru = "Дома" if pt == "house" else "Бизнесы"
-                lines.append(f"`   │  └─📍 {pt_ru}:`")
+                ind = "   │  " if not is_last_srv else "      "
+                lines.append(f"`{ind}└─📍 {pt_ru}:`")
 
                 for ii, item in enumerate(items):
                     is_last_item = ii == len(items) - 1
-                    item_prefix  = "`         └─`" if is_last_item else "`         ├─`"
+                    item_ind    = "   │     " if not is_last_srv else "         "
+                    item_prefix = f"{item_ind}└─" if is_last_item else f"{item_ind}├─"
                     prop_id = item.get("propId")
                     pos     = item.get("pos")
                     pd      = item.get("pd", 0)
 
                     if prop_id:
-                        lines.append(f"{item_prefix}` id {prop_id} (PD: {pd})`")
+                        lines.append(f"`{item_prefix} id {prop_id} (PD: {pd})`")
                     elif pos:
-                        lines.append(f"{item_prefix}` pos {pos} (PD: {pd})`")
+                        lines.append(f"`{item_prefix} pos {pos} (PD: {pd})`")
                     else:
-                        lines.append(f"{item_prefix}` PD: {pd}`")
+                        lines.append(f"`{item_prefix} PD: {pd}`")
 
         lines.append("")
 
