@@ -55,7 +55,6 @@ def server_label(srv):
 #   Расчёт времени слёта (как в property_tracker.lua)
 # ============================================================
 MSK_OFFSET = 3 * 3600
-# MSK timezone for display/parsing
 MSK_TZ = _dt.timezone(_dt.timedelta(hours=3))
 
 def format_msk(ts, fmt="%d.%m.%Y %H:%M"):
@@ -66,8 +65,6 @@ def format_msk(ts, fmt="%d.%m.%Y %H:%M"):
 
 DEFAULT_DROP_AT_HOUSE = 1
 DEFAULT_DROP_AT_BIZ   = 1
-
-# Новый: дефолтное значение D (сколько отнимается PD в час)
 DEFAULT_D = 1
 
 SERVER_DROP_AT_HOUSE = {
@@ -93,8 +90,6 @@ SERVER_DROP_AT_BIZ = {
 }
 
 def get_drop_at(server, prop_type):
-    """Текущее значение 'Порог' для сервера/типа: сначала из настроек в Firebase,
-    иначе — значение по умолчанию (как захардкожено в скрипте)."""
     try:
         cfg = db.reference(f"config/dropAt/{server}/{prop_type}").get()
     except Exception:
@@ -109,8 +104,6 @@ def set_drop_at(server, prop_type, value):
     db.reference(f"config/dropAt/{server}/{prop_type}").set(int(value))
 
 def calc_expiry_ts(pd, drop_at, now=None):
-    """Точная копия calcExpiryTs() из property_tracker.lua:
-    hoursLeft = max(pd - (dropAt - 1), 0), время округляется вниз до часа по МСК."""
     if now is None:
         now = int(time.time())
     hours_left  = max(pd - (drop_at - 1), 0)
@@ -120,10 +113,6 @@ def calc_expiry_ts(pd, drop_at, now=None):
     return future_msk - MSK_OFFSET
 
 def calc_expiry_from_pdl(pd, d, l, now=None):
-    """Формула по P/D/L (D — сколько отнимается каждый час, L — порог):
-    P — текущий Payday, D — на сколько Payday уменьшается каждый час,
-    L — порог слёта (Payday, при достижении которого дом упадёт на след. час).
-    hoursLeft = floor((P - L) / D) + 1, время округляется вниз до часа по МСК."""
     if now is None:
         now = int(time.time())
     if d <= 0:
@@ -180,7 +169,6 @@ t.start()
 
 @app.route("/update", methods=["POST"])
 def update():
-    # Проверка секретного ключа
     secret = request.headers.get("X-Secret-Key", "")
     if SECRET_KEY and secret != SECRET_KEY:
         return jsonify({"error": "unauthorized"}), 403
@@ -200,7 +188,6 @@ def update():
     if not server or not entries:
         return jsonify({"error": "missing fields"}), 400
 
-    # Валидация сервера
     if server not in VALID_SERVERS:
         return jsonify({"error": "invalid server"}), 400
 
@@ -232,7 +219,6 @@ def update():
         drop_at = e.get("dropAt")
         d_val   = e.get("d", DEFAULT_D)
 
-        # Если есть ID — храним каждый объект отдельно
         if prop_id:
             key = f"{e['propType']}_{prop_id}"
             kept[key] = {
@@ -248,7 +234,6 @@ def update():
                 "count":    1,
             }
         else:
-            # Без ID — группируем по времени
             key = f"{e['propType']}_{expiry_h}_{pos or 0}"
             if key not in kept:
                 kept[key] = {
@@ -306,10 +291,7 @@ def ping():
 def get_time():
     return jsonify({"utc": int(time.time())})
 
-# ══════════════════════════════════════════════════════════
-#  ADMIN PANEL
-# ══════════════════════════════════════════════════════════
-
+# ADMIN PANEL
 def login_required(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
@@ -521,7 +503,6 @@ def flash_msg(kind, msg):
     flashes.append((kind, msg))
     session["_flashes"] = flashes
 
-# ── Логин ─────────────────────────────────────────────────
 @app.route("/admin/login", methods=["GET", "POST"])
 def admin_login():
     if request.method == "POST":
@@ -561,7 +542,6 @@ def admin_logout():
 def admin_root():
     return redirect(url_for("admin_dashboard"))
 
-# ── Дашборд ───────────────────────────────────────────────
 @app.route("/admin/dashboard")
 @login_required
 def admin_dashboard():
@@ -587,7 +567,6 @@ def admin_dashboard():
     body = f"<h1>Дашборд</h1><div class='grid'>{grid}</div>"
     return render_page("Дашборд", "dashboard", body)
 
-# ── Ключи ─────────────────────────────────────────────────
 @app.route("/admin/keys")
 @login_required
 def admin_keys():
@@ -660,7 +639,6 @@ def admin_key_revoke(key):
         flash_msg("err", "Ключ уже использован или не найден")
     return redirect(url_for("admin_keys"))
 
-# ── Пользователи ──────────────────────────────────────────
 @app.route("/admin/users")
 @login_required
 def admin_users():
@@ -766,57 +744,7 @@ def admin_user_unban(uid):
     flash_msg("ok", f"Пользователь {uid} разбанен")
     return redirect(url_for("admin_users"))
 
-# ── Настройки расчёта (dropAt) ─────────────────────────────
-@app.route("/admin/settings")
-@login_required
-def admin_settings():
-    rows = ""
-    for s in SERVER_ORDER:
-        if s not in VALID_SERVERS:
-            continue
-        h = get_drop_at(s, "house")
-        b = get_drop_at(s, "business")
-        rows += (
-            f"<tr><td>{server_label(s)}</td>"
-            f"<td><input type='number' name='house_{s}' value='{h}' min='0' max='10' style='width:80px'></td>"
-            f"<td><input type='number' name='biz_{s}' value='{b}' min='0' max='10' style='width:80px'></td></tr>"
-        )
-    body = f"""
-    <h1>Настройки расчёта слётов</h1>
-    <div class="card">
-      <p style="color:var(--muted);margin-top:0">
-        «Порог» — Payday, при достижении которого дом упадёт на следующий час (раньше назывался «Дроп»).
-        Эти значения используются по умолчанию при добавлении и редактировании записей на вкладках «Слёты» и «Истёкшие».
-      </p>
-      <form method="post" action="{url_for('admin_settings_save')}">
-        <table>
-          <tr><th>Сервер</th><th>Дом</th><th>Бизнес</th></tr>
-          {rows}
-        </table>
-        <div style="margin-top:14px"><button type="submit">Сохранить</button></div>
-      </form>
-    </div>"""
-    return render_page("Настройки", "settings", body)
-
-@app.route("/admin/settings/save", methods=["POST"])
-@login_required
-def admin_settings_save():
-    for s in SERVER_ORDER:
-        if s not in VALID_SERVERS:
-            continue
-        for prefix, prop_type in (("house_", "house"), ("biz_", "business")):
-            raw = request.form.get(f"{prefix}{s}", "").strip()
-            if raw == "":
-                continue
-            try:
-                val = int(raw)
-            except ValueError:
-                continue
-            set_drop_at(s, prop_type, val)
-    flash_msg("ok", "Настройки сохранены")
-    return redirect(url_for("admin_settings"))
-
-# ── Слёты (properties) ────────────────────────────────────
+# Properties functions
 def _collect_property_entries(srv_filter):
     data = db.reference("properties").get() or {}
     all_entries = []
@@ -832,7 +760,6 @@ def _collect_property_entries(srv_filter):
     return all_entries
 
 def _render_property_rows(entries, back_endpoint="admin_properties"):
-    """entries: list of (srv, key, value_dict), already sorted. Returns table rows HTML."""
     now = int(time.time())
     rows = ""
     for i, (srv, k, v) in enumerate(entries):
@@ -857,8 +784,8 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
 
         d_val = v.get("d", DEFAULT_D)
 
-        # Checkbox cell added (value: server|key)
-        checkbox = f'<input type="checkbox" class="sel-row" name="selected" value="{srv}|{k}">'
+        # Checkbox hidden by default; shown only after pressing "Изменить выбранные"
+        checkbox = f'<input type="checkbox" class="sel-row" name="selected" value="{srv}|{k}" style="display:none">'
 
         rows += (
             f"<tr id='view-{row_id}'><td style='width:36px'>{checkbox}</td>"
@@ -898,7 +825,6 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
         </tr>"""
     return rows
 
-
 TOGGLE_EDIT_SCRIPT = """
     <script>
     function toggleEdit(id) {
@@ -918,7 +844,6 @@ def admin_properties():
     srv_filter = request.args.get("server", "")
 
     all_entries = [e for e in _collect_property_entries(srv_filter) if e[2].get("expiryTs", 0) > now]
-    # Ближайшие слёты — первыми
     all_entries.sort(key=lambda item: item[2].get("expiryTs", 0))
     rows = _render_property_rows(all_entries, back_endpoint="admin_properties")
 
@@ -926,35 +851,43 @@ def admin_properties():
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
     )
 
-    # enhanced action panel with titles/explanations
     action_panel = f"""
     <div class="card" style="padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <div style="text-align:center;min-width:140px">
         <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Выбор строк</div>
-        <button id="select-all" class="ghost">Выбрать всё</button>
+        <button id="select-all" class="ghost" style="display:none">Выбрать всё</button>
         <div style="font-size:12px;color:var(--muted);margin-top:6px">Отметить / снять все строки в таблице</div>
       </div>
 
       <div style="text-align:center;min-width:180px">
         <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое редактирование</div>
         <button id="edit-selected">Изменить выбранные</button>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px">Открыть форму, где можно отредактировать несколько записей и сохранить их разом</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">Нажмите сначала «Изменить выбранные», затем отметьте нужные строки и нажмите снова, чтобы открыть форму редактирования</div>
       </div>
 
       <div style="text-align:center;min-width:160px">
         <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое удаление</div>
         <button id="delete-selected" class="danger">Удалить выбранные</button>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px">Удалить отмеченные записи (будет запрос подтверждения)</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">Нажмите сначала «Изменить выбранные», отметьте и затем удалите выбранные записи</div>
       </div>
 
       <div style="flex:1"></div>
     </div>
     """
 
-    # JS for batch actions: build as plain string and replace placeholders with urls
+    # Batch JS: selection mode required before checking boxes; second click on edit will post selected items
     batch_js = """
     <script>
     (function(){
+      var selectMode = false;
+      function showCheckboxes(show){
+        document.querySelectorAll('.sel-row').forEach(function(cb){
+          cb.style.display = show ? 'inline-block' : 'none';
+          if(!show) cb.checked = false;
+        });
+        var selAll = document.getElementById('select-all');
+        if(selAll) selAll.style.display = show ? 'inline-block' : 'none';
+      }
       function getSelected(){
         var vals=[];
         document.querySelectorAll('.sel-row:checked').forEach(function(cb){ vals.push(cb.value); });
@@ -971,11 +904,53 @@ def admin_properties():
         form.submit();
       }
       document.addEventListener('click', function(e){
-        if(!e.target) return;
-        if(e.target.id==='select-all'){ e.preventDefault(); var all=document.querySelectorAll('.sel-row'); var allChecked=true; all.forEach(function(cb){ if(!cb.checked) allChecked=false; }); all.forEach(function(cb){ cb.checked = !allChecked; }); }
-        if(e.target.id==='edit-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } post("__EDIT_URL__", s); }
-        if(e.target.id==='delete-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } if(!confirm('Удалить выбранные записи?')) return; post("__DELETE_URL__", s); }
+        var t = e.target;
+        if(!t) return;
+
+        if(t.id === 'edit-selected'){
+          e.preventDefault();
+          if(!selectMode){
+            // enable select mode
+            selectMode = true;
+            showCheckboxes(true);
+            t.textContent = 'Готово — редактировать';
+            return;
+          }
+          // already in select mode -> proceed to edit selected
+          var s = getSelected();
+          if(!s.length){ alert('Ничего не выбрано'); return; }
+          post("__EDIT_URL__", s);
+          return;
+        }
+
+        if(t.id === 'select-all'){
+          e.preventDefault();
+          var all = Array.from(document.querySelectorAll('.sel-row'));
+          var anyUnchecked = all.some(function(cb){ return !cb.checked; });
+          all.forEach(function(cb){ cb.checked = anyUnchecked; });
+          return;
+        }
+
+        if(t.id === 'delete-selected'){
+          e.preventDefault();
+          if(!selectMode){
+            // enable select mode for deletion
+            selectMode = true;
+            showCheckboxes(true);
+            document.getElementById('edit-selected').textContent = 'Готово — редактировать';
+            t.textContent = 'Удалить выбранные';
+            return;
+          }
+          var s = getSelected();
+          if(!s.length){ alert('Ничего не выбрано'); return; }
+          if(!confirm('Удалить выбранные записи?')) return;
+          post("__DELETE_URL__", s);
+          return;
+        }
       });
+
+      // When navigating away or on page load, ensure checkboxes are hidden
+      document.addEventListener('DOMContentLoaded', function(){ showCheckboxes(false); });
     })();
     </script>
     """.replace("__EDIT_URL__", url_for('admin_properties_batch_edit')).replace("__DELETE_URL__", url_for('admin_properties_batch_delete'))
@@ -1018,7 +993,6 @@ def admin_properties():
     """
     return render_page("Слёты", "properties", body)
 
-
 @app.route("/admin/properties/expired")
 @login_required
 def admin_expired():
@@ -1026,7 +1000,6 @@ def admin_expired():
     srv_filter = request.args.get("server", "")
 
     all_entries = [e for e in _collect_property_entries(srv_filter) if e[2].get("expiryTs", 0) <= now]
-    # Недавно истёкшие — первыми
     all_entries.sort(key=lambda item: item[2].get("expiryTs", 0), reverse=True)
     rows = _render_property_rows(all_entries, back_endpoint="admin_expired")
 
@@ -1038,20 +1011,20 @@ def admin_expired():
     <div class="card" style="padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <div style="text-align:center;min-width:140px">
         <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Выбор строк</div>
-        <button id="select-all" class="ghost">Выбрать всё</button>
+        <button id="select-all" class="ghost" style="display:none">Выбрать всё</button>
         <div style="font-size:12px;color:var(--muted);margin-top:6px">Отметить / снять все строки в таблице</div>
       </div>
 
       <div style="text-align:center;min-width:180px">
         <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое редактирование</div>
         <button id="edit-selected">Изменить выбранные</button>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px">Открыть форму, где можно отредактировать несколько записей и сохранить их разом</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">Нажмите сначала «Изменить выбранные», затем отметьте нужные строки и нажмите снова, чтобы открыть форму редактирования</div>
       </div>
 
       <div style="text-align:center;min-width:160px">
         <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое удаление</div>
         <button id="delete-selected" class="danger">Удалить выбранные</button>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px">Удалить отмеченные записи (будет запрос подтверждения)</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">Нажмите сначала «Изменить выбранные», отметьте и затем удалите выбранные записи</div>
       </div>
 
       <div style="flex:1"></div>
@@ -1061,6 +1034,15 @@ def admin_expired():
     batch_js = """
     <script>
     (function(){
+      var selectMode = false;
+      function showCheckboxes(show){
+        document.querySelectorAll('.sel-row').forEach(function(cb){
+          cb.style.display = show ? 'inline-block' : 'none';
+          if(!show) cb.checked = false;
+        });
+        var selAll = document.getElementById('select-all');
+        if(selAll) selAll.style.display = show ? 'inline-block' : 'none';
+      }
       function getSelected(){
         var vals=[];
         document.querySelectorAll('.sel-row:checked').forEach(function(cb){ vals.push(cb.value); });
@@ -1077,11 +1059,49 @@ def admin_expired():
         form.submit();
       }
       document.addEventListener('click', function(e){
-        if(!e.target) return;
-        if(e.target.id==='select-all'){ e.preventDefault(); var all=document.querySelectorAll('.sel-row'); var allChecked=true; all.forEach(function(cb){ if(!cb.checked) allChecked=false; }); all.forEach(function(cb){ cb.checked = !allChecked; }); }
-        if(e.target.id==='edit-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } post("__EDIT_URL__", s); }
-        if(e.target.id==='delete-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } if(!confirm('Удалить выбранные записи?')) return; post("__DELETE_URL__", s); }
+        var t = e.target;
+        if(!t) return;
+
+        if(t.id === 'edit-selected'){
+          e.preventDefault();
+          if(!selectMode){
+            selectMode = true;
+            showCheckboxes(true);
+            t.textContent = 'Готово — редактировать';
+            return;
+          }
+          var s = getSelected();
+          if(!s.length){ alert('Ничего не выбрано'); return; }
+          post("__EDIT_URL__", s);
+          return;
+        }
+
+        if(t.id === 'select-all'){
+          e.preventDefault();
+          var all = Array.from(document.querySelectorAll('.sel-row'));
+          var anyUnchecked = all.some(function(cb){ return !cb.checked; });
+          all.forEach(function(cb){ cb.checked = anyUnchecked; });
+          return;
+        }
+
+        if(t.id === 'delete-selected'){
+          e.preventDefault();
+          if(!selectMode){
+            selectMode = true;
+            showCheckboxes(true);
+            document.getElementById('edit-selected').textContent = 'Готово — редактировать';
+            t.textContent = 'Удалить выбранные';
+            return;
+          }
+          var s = getSelected();
+          if(!s.length){ alert('Ничего не выбрано'); return; }
+          if(!confirm('Удалить выбранные записи?')) return;
+          post("__DELETE_URL__", s);
+          return;
+        }
       });
+
+      document.addEventListener('DOMContentLoaded', function(){ showCheckboxes(false); });
     })();
     </script>
     """.replace("__EDIT_URL__", url_for('admin_properties_batch_edit')).replace("__DELETE_URL__", url_for('admin_properties_batch_delete'))
@@ -1119,7 +1139,6 @@ def admin_property_add():
         flash_msg("err", "Неверное значение PayDay")
         return redirect(url_for("admin_properties"))
 
-    # Новый: парсим D (сколько отнимается)
     d_raw = request.form.get("d", "").strip()
     try:
         d_val = int(d_raw) if d_raw != "" else DEFAULT_D
@@ -1201,8 +1220,23 @@ def admin_properties_batch_edit():
         flash_msg("err", "Выбранные записи не найдены")
         return redirect(url_for("admin_properties"))
 
-    # Построим форму массового редактирования
     rows = ""
+    # Header labels for clarity in mass edit
+    labels = """
+    <div class="card" style="margin-bottom:8px;padding:10px;color:var(--muted)">
+      <div class="row" style="gap:8px;align-items:center">
+        <div style="width:160px;font-weight:600">Сервер</div>
+        <div style="width:120px;font-weight:600">Тип</div>
+        <div style="width:90px;font-weight:600">PD</div>
+        <div style="width:90px;font-weight:600">D</div>
+        <div style="width:110px;font-weight:600">ID</div>
+        <div style="width:110px;font-weight:600">pos</div>
+        <div style="width:90px;font-weight:600">Порог</div>
+        <div style="width:200px;font-weight:600">Время слёта</div>
+        <div style="width:80px;font-weight:600">Удалить</div>
+      </div>
+    </div>
+    """
     for i, (srv, key, v) in enumerate(entries):
         idx = i
         dt_local = _dt.datetime.fromtimestamp(v.get("expiryTs", 0), tz=MSK_TZ).strftime("%Y-%m-%dT%H:%M") if v.get("expiryTs") else ""
@@ -1230,6 +1264,7 @@ def admin_properties_batch_edit():
 
     form = f"""
     <h1>Массовое редактирование ({len(entries)})</h1>
+    {labels}
     <form method="post" action="{url_for('admin_properties_batch_update')}">
       {rows}
       <input type="hidden" name="count" value="{len(entries)}">
@@ -1277,7 +1312,6 @@ def admin_properties_batch_update():
         drop_raw = request.form.get(f"dropAt_{sidx}", "").strip()
         expiry_str = request.form.get(f"expiry_{sidx}", "").strip()
 
-        # compute expiry_ts
         if drop_raw:
             try:
                 drop_at = int(drop_raw)
@@ -1286,7 +1320,6 @@ def admin_properties_batch_update():
                 expiry_ts = int(now)
                 drop_at = None
         else:
-            # parse datetime-local as MSK
             if expiry_str:
                 try:
                     dt = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M")
@@ -1310,7 +1343,6 @@ def admin_properties_batch_update():
             "count": 1,
         }
 
-        # write to DB (move if server changed)
         if new_server != orig_server:
             db.reference(f"properties/{orig_server}/{orig_key}").delete()
             db.reference(f"properties/{new_server}/{orig_key}").set(new_record)
@@ -1423,7 +1455,6 @@ def admin_property_update(server, key):
         flash_msg("err", "Неверный PD")
         return redirect(url_for("admin_property_edit", server=server, key=key))
 
-    # парсим D
     try:
         d_val = int(d_raw) if d_raw != "" else old.get("d", DEFAULT_D)
     except ValueError:
@@ -1449,7 +1480,6 @@ def admin_property_update(server, key):
             return redirect(url_for("admin_property_edit", server=server, key=key))
         expiry_ts = calc_expiry_from_pdl(pd, d_val, drop_at)
     else:
-        # Парсим datetime-local как МСК (UTC+3), чтобы не было сдвига -3h
         try:
             if expiry_str:
                 dt = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M")
@@ -1482,7 +1512,6 @@ def admin_property_update(server, key):
     flash_msg("ok", "Запись обновлена")
     return redirect(url_for(back))
 
-# ── Рассылка ──────────────────────────────────────────────
 @app.route("/admin/broadcast")
 @login_required
 def admin_broadcast():
