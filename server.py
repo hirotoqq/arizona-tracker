@@ -825,6 +825,23 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
         </tr>"""
     return rows
 
+def _collect_property_entries(srv_filter):
+    """Собирает все записи properties из Firebase, опционально фильтруя по серверу.
+    Возвращает список кортежей (server, key, value_dict).
+    """
+    data = db.reference("properties").get() or {}
+    all_entries = []
+    for srv, entries in data.items():
+        if not isinstance(entries, dict):
+            continue
+        if srv_filter and srv != srv_filter:
+            continue
+        for k, v in entries.items():
+            if not isinstance(v, dict):
+                continue
+            all_entries.append((srv, k, v))
+    return all_entries
+    
 TOGGLE_EDIT_SCRIPT = """
     <script>
     function toggleEdit(id) {
