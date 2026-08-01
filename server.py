@@ -47,8 +47,6 @@ SERVER_ORDER = [
 ]
 
 def server_label(srv):
-    if srv in SERVER_ORDER:
-        return f"{SERVER_ORDER.index(srv) + 1:02d}. {srv}"
     return srv
 
 KEY_ALPHABET  = string.ascii_uppercase + string.digits
@@ -563,30 +561,62 @@ def admin_properties():
     data     = db.reference("properties").get() or {}
     srv_filter = request.args.get("server", "")
 
-    rows = ""
-    server_keys = sorted(data.keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999)
-    for srv in server_keys:
-        entries = data[srv]
+    all_entries = []
+    for srv, entries in data.items():
         if not isinstance(entries, dict):
             continue
         if srv_filter and srv != srv_filter:
             continue
-        for k, v in sorted(entries.items(), key=lambda kv: kv[1].get("expiryTs", 0) if isinstance(kv[1], dict) else 0):
+        for k, v in entries.items():
             if not isinstance(v, dict):
                 continue
-            expiry = v.get("expiryTs", 0)
-            expired = expiry <= now
-            when = time.strftime("%d.%m.%Y %H:%M", time.localtime(expiry)) if expiry else "—"
-            status = '<span class="pill bad">истёк</span>' if expired else '<span class="pill ok">активен</span>'
-            del_btn = (
-                f'<form class="inline" method="post" action="{url_for("admin_property_delete", server=srv, key=k)}" '
-                f'onsubmit="return confirm(\'Удалить запись?\')"><button class="danger" type="submit">Удалить</button></form>'
-            )
-            edit_btn = f'<a href="{url_for("admin_property_edit", server=srv, key=k)}"><button class="ghost" type="button">Изменить</button></a>'
-            rows += (
-                f"<tr><td>{server_label(srv)}</td><td>{v.get('propType','?')}</td><td>{v.get('pd','—')}</td>"
-                f"<td>{v.get('propId') or v.get('pos') or '—'}</td><td>{when}</td><td>{status}</td><td class='row'>{edit_btn}{del_btn}</td></tr>"
-            )
+            all_entries.append((srv, k, v))
+
+    # Ближайшие слёты — первыми
+    all_entries.sort(key=lambda item: item[2].get("expiryTs", 0))
+
+    rows = ""
+    for i, (srv, k, v) in enumerate(all_entries):
+        expiry = v.get("expiryTs", 0)
+        expired = expiry <= now
+        when = time.strftime("%d.%m.%Y %H:%M", time.localtime(expiry)) if expiry else "—"
+        dt_local = time.strftime("%Y-%m-%dT%H:%M", time.localtime(expiry)) if expiry else ""
+        status = '<span class="pill bad">истёк</span>' if expired else '<span class="pill ok">активен</span>'
+        row_id = f"pr{i}"
+
+        del_btn = (
+            f'<form class="inline" method="post" action="{url_for("admin_property_delete", server=srv, key=k)}" '
+            f'onsubmit="return confirm(\'Удалить запись?\')"><button class="danger" type="submit">Удалить</button></form>'
+        )
+        edit_btn = f'<button class="ghost" type="button" onclick="toggleEdit(\'{row_id}\')">Изменить</button>'
+
+        rows += (
+            f"<tr id='view-{row_id}'><td>{server_label(srv)}</td><td>{v.get('propType','?')}</td><td>{v.get('pd','—')}</td>"
+            f"<td>{v.get('propId') or v.get('pos') or '—'}</td><td>{when}</td><td>{status}</td><td class='row'>{edit_btn}{del_btn}</td></tr>"
+        )
+
+        server_opts = "".join(
+            f'<option value="{s}" {"selected" if s == srv else ""}>{server_label(s)}</option>'
+            for s in SERVER_ORDER if s in VALID_SERVERS
+        )
+        rows += f"""
+        <tr id='edit-{row_id}' style='display:none'>
+          <td colspan='7'>
+            <form method="post" action="{url_for('admin_property_update', server=srv, key=k)}" class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+              <select name="server">{server_opts}</select>
+              <select name="propType">
+                <option value="house" {"selected" if v.get("propType")=="house" else ""}>🏠 house</option>
+                <option value="business" {"selected" if v.get("propType")=="business" else ""}>🏢 business</option>
+              </select>
+              <input type="number" name="pd" value="{v.get('pd', 0)}" min="1" max="65" required style="width:90px">
+              <input type="datetime-local" name="expiry" value="{dt_local}" required>
+              <input type="text" name="propId" placeholder="ID" value="{v.get('propId') or ''}" style="width:120px">
+              <input type="text" name="pos" placeholder="Позиция" value="{v.get('pos') or ''}" style="width:120px">
+              <button type="submit">Сохранить</button>
+              <button type="button" class="ghost" onclick="toggleEdit('{row_id}')">Отмена</button>
+            </form>
+          </td>
+        </tr>"""
 
     server_options = "".join(
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
@@ -617,7 +647,17 @@ def admin_properties():
     <table>
       <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>ID/поз.</th><th>Слёт</th><th>Статус</th><th></th></tr>
       {rows or "<tr><td colspan='7'>Записей нет</td></tr>"}
-    </table>"""
+    </table>
+    <script>
+    function toggleEdit(id) {{
+      var view = document.getElementById('view-' + id);
+      var edit = document.getElementById('edit-' + id);
+      if (!view || !edit) return;
+      var editing = edit.style.display !== 'none';
+      view.style.display = editing ? '' : 'none';
+      edit.style.display = editing ? 'none' : '';
+    }}
+    </script>"""
     return render_page("Слёты", "properties", body)
 
 @app.route("/admin/properties/add", methods=["POST"])
