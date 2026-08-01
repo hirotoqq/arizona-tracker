@@ -89,28 +89,48 @@ def update():
     written = 0
     for e in entries:
         pd = e.get("pd", 0)
-        # Пропускаем объекты с pd > 65 или pd <= 0
         if pd > 65 or pd <= 0:
             continue
-        # Пропускаем неизвестные типы
         if e.get("propType") not in ("house", "business"):
             continue
         expiry_h = (e["expiryTs"] // 3600) * 3600
-        # Пропускаем если время уже прошло
         if expiry_h <= now:
             continue
-        key = f"{e['propType']}_{expiry_h}"
-        if key not in kept:
+
+        prop_id = e.get("propId")
+        pos     = e.get("pos")
+
+        # Если есть ID — храним каждый объект отдельно
+        if prop_id:
+            key = f"{e['propType']}_{prop_id}"
             kept[key] = {
                 "server":   server,
                 "propType": e["propType"],
                 "pd":       pd,
                 "expiryTs": expiry_h,
                 "scanTs":   now,
-                "count":    0,
+                "propId":   prop_id,
+                "pos":      pos,
+                "count":    1,
             }
-        kept[key]["count"] = kept[key].get("count", 0) + 1
+        else:
+            # Без ID — группируем по времени
+            key = f"{e['propType']}_{expiry_h}_{pos or 0}"
+            if key not in kept:
+                kept[key] = {
+                    "server":   server,
+                    "propType": e["propType"],
+                    "pd":       pd,
+                    "expiryTs": expiry_h,
+                    "scanTs":   now,
+                    "propId":   None,
+                    "pos":      pos,
+                    "count":    1,
+                }
         written += 1
+
+    ref.set(kept)
+    return jsonify({"ok": True, "written": written})
 
     ref.set(kept)
     return jsonify({"ok": True, "written": written})
