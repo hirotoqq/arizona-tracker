@@ -346,6 +346,10 @@ input,select,button,textarea{
   background:var(--surface2);border:1px solid var(--border);color:var(--text);
   padding:9px 12px;border-radius:8px;font-size:14px;font-family:inherit
 }
+input[type=checkbox],input[type=radio]{
+  width:16px;height:16px;padding:0;background:none;border:1px solid var(--border);
+  accent-color:var(--accent);border-radius:4px;vertical-align:middle
+}
 textarea{width:100%;min-height:120px;resize:vertical}
 button{cursor:pointer;background:var(--accent);color:#0d0f14;font-weight:600;border:none}
 button:hover{opacity:.88}
@@ -862,6 +866,91 @@ TOGGLE_EDIT_SCRIPT = """
     }
     </script>"""
 
+def _render_batch_action_panel():
+    return """
+    <div class="card row" style="align-items:center;gap:16px;padding:14px 18px">
+      <div class="row" style="gap:10px">
+        <button id="edit-selected" class="ghost" type="button">Редактировать</button>
+        <button id="delete-selected" class="danger" type="button">Удалить</button>
+        <button id="cancel-selected" class="ghost" type="button" style="display:none">Отмена</button>
+      </div>
+      <div id="selection-hint" style="color:var(--muted);font-size:13px">Отметьте нужные строки в таблице, затем нажмите «Редактировать» или «Удалить»</div>
+    </div>
+    """
+
+def _render_batch_js(edit_url, delete_url):
+    return f"""
+    <script>
+    (function(){{
+      var selectMode = false;
+      var editBtn   = document.getElementById('edit-selected');
+      var delBtn    = document.getElementById('delete-selected');
+      var cancelBtn = document.getElementById('cancel-selected');
+      var hint      = document.getElementById('selection-hint');
+
+      function showCheckboxes(show){{
+        document.querySelectorAll('.sel-row').forEach(function(cb){{
+          cb.style.display = show ? 'inline-block' : 'none';
+          if(!show) cb.checked = false;
+        }});
+      }}
+      function getSelected(){{
+        var vals=[];
+        document.querySelectorAll('.sel-row:checked').forEach(function(cb){{ vals.push(cb.value); }});
+        return vals;
+      }}
+      function enterSelectMode(){{
+        selectMode = true;
+        showCheckboxes(true);
+        editBtn.textContent = 'Изменить';
+        cancelBtn.style.display = 'inline-block';
+        hint.textContent = 'Отметьте нужные строки, затем нажмите «Изменить» или «Удалить»';
+      }}
+      function exitSelectMode(){{
+        selectMode = false;
+        showCheckboxes(false);
+        editBtn.textContent = 'Редактировать';
+        cancelBtn.style.display = 'none';
+        hint.textContent = 'Отметьте нужные строки в таблице, затем нажмите «Редактировать» или «Удалить»';
+      }}
+      function post(url, arr){{
+        var form = document.createElement('form');
+        form.method='post';
+        form.action=url;
+        arr.forEach(function(v){{
+          var i=document.createElement('input'); i.type='hidden'; i.name='selected'; i.value=v; form.appendChild(i);
+        }});
+        document.body.appendChild(form);
+        form.submit();
+      }}
+
+      editBtn.addEventListener('click', function(e){{
+        e.preventDefault();
+        if(!selectMode){{ enterSelectMode(); return; }}
+        var s = getSelected();
+        if(!s.length){{ alert('Отметьте хотя бы одну запись'); return; }}
+        post("{edit_url}", s);
+      }});
+
+      delBtn.addEventListener('click', function(e){{
+        e.preventDefault();
+        if(!selectMode){{ enterSelectMode(); return; }}
+        var s = getSelected();
+        if(!s.length){{ alert('Отметьте хотя бы одну запись'); return; }}
+        if(!confirm('Удалить выбранные записи (' + s.length + ')?')) return;
+        post("{delete_url}", s);
+      }});
+
+      cancelBtn.addEventListener('click', function(e){{
+        e.preventDefault();
+        exitSelectMode();
+      }});
+
+      document.addEventListener('DOMContentLoaded', function(){{ showCheckboxes(false); }});
+    }})();
+    </script>
+    """
+
 @app.route("/admin/properties")
 @login_required
 def admin_properties():
@@ -880,109 +969,8 @@ def admin_properties():
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
     )
 
-    action_panel = f"""
-    <div class="card" style="padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-      <div style="text-align:center;min-width:140px">
-        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Выбор строк</div>
-        <button id="select-all" class="ghost" style="display:none">Выбрать всё</button>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px">Отметить / снять все строки в таблице</div>
-      </div>
-
-      <div style="text-align:center;min-width:180px">
-        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое редактирование</div>
-        <button id="edit-selected">Изменить выбранные</button>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px">Нажмите сначала «Изменить выбранные», затем отметьте нужные строки и нажмите снова, чтобы открыть форму редактирования</div>
-      </div>
-
-      <div style="text-align:center;min-width:160px">
-        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое удаление</div>
-        <button id="delete-selected" class="danger">Удалить выбранные</button>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px">Нажмите сначала «Изменить выбранные», отметьте и затем удалите выбранные записи</div>
-      </div>
-
-      <div style="flex:1"></div>
-    </div>
-    """
-
-    # Batch JS: selection mode required before checking boxes; second click on edit will post selected items
-    batch_js = """
-    <script>
-    (function(){
-      var selectMode = false;
-      function showCheckboxes(show){
-        document.querySelectorAll('.sel-row').forEach(function(cb){
-          cb.style.display = show ? 'inline-block' : 'none';
-          if(!show) cb.checked = false;
-        });
-        var selAll = document.getElementById('select-all');
-        if(selAll) selAll.style.display = show ? 'inline-block' : 'none';
-      }
-      function getSelected(){
-        var vals=[];
-        document.querySelectorAll('.sel-row:checked').forEach(function(cb){ vals.push(cb.value); });
-        return vals;
-      }
-      function post(url, arr){
-        var form = document.createElement('form');
-        form.method='post';
-        form.action=url;
-        arr.forEach(function(v){
-          var i=document.createElement('input'); i.type='hidden'; i.name='selected'; i.value=v; form.appendChild(i);
-        });
-        document.body.appendChild(form);
-        form.submit();
-      }
-      document.addEventListener('click', function(e){
-        var t = e.target;
-        if(!t) return;
-
-        if(t.id === 'edit-selected'){
-          e.preventDefault();
-          if(!selectMode){
-            // enable select mode
-            selectMode = true;
-            showCheckboxes(true);
-            t.textContent = 'Готово — редактировать';
-            return;
-          }
-          // already in select mode -> proceed to edit selected
-          var s = getSelected();
-          if(!s.length){ alert('Ничего не выбрано'); return; }
-          post("__EDIT_URL__", s);
-          return;
-        }
-
-        if(t.id === 'select-all'){
-          e.preventDefault();
-          var all = Array.from(document.querySelectorAll('.sel-row'));
-          var anyUnchecked = all.some(function(cb){ return !cb.checked; });
-          all.forEach(function(cb){ cb.checked = anyUnchecked; });
-          return;
-        }
-
-        if(t.id === 'delete-selected'){
-          e.preventDefault();
-          if(!selectMode){
-            // enable select mode for deletion
-            selectMode = true;
-            showCheckboxes(true);
-            document.getElementById('edit-selected').textContent = 'Готово — редактировать';
-            t.textContent = 'Удалить выбранные';
-            return;
-          }
-          var s = getSelected();
-          if(!s.length){ alert('Ничего не выбрано'); return; }
-          if(!confirm('Удалить выбранные записи?')) return;
-          post("__DELETE_URL__", s);
-          return;
-        }
-      });
-
-      // When navigating away or on page load, ensure checkboxes are hidden
-      document.addEventListener('DOMContentLoaded', function(){ showCheckboxes(false); });
-    })();
-    </script>
-    """.replace("__EDIT_URL__", url_for('admin_properties_batch_edit')).replace("__DELETE_URL__", url_for('admin_properties_batch_delete'))
+    action_panel = _render_batch_action_panel()
+    batch_js = _render_batch_js(url_for('admin_properties_batch_edit'), url_for('admin_properties_batch_delete'))
 
     body = f"""
     <h1>Данные о слётах</h1>
@@ -1038,104 +1026,8 @@ def admin_expired():
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
     )
 
-    action_panel = f"""
-    <div class="card" style="padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-      <div style="text-align:center;min-width:140px">
-        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Выбор строк</div>
-        <button id="select-all" class="ghost" style="display:none">Выбрать всё</button>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px">Отметить / снять все строки в таблице</div>
-      </div>
-
-      <div style="text-align:center;min-width:180px">
-        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое редактирование</div>
-        <button id="edit-selected">Изменить выбранные</button>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px">Нажмите сначала «Изменить выбранные», затем отметьте нужные строки и нажмите снова, чтобы открыть форму редактирования</div>
-      </div>
-
-      <div style="text-align:center;min-width:160px">
-        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое удаление</div>
-        <button id="delete-selected" class="danger">Удалить выбранные</button>
-        <div style="font-size:12px;color:var(--muted);margin-top:6px">Нажмите сначала «Изменить выбранные», отметьте и затем удалите выбранные записи</div>
-      </div>
-
-      <div style="flex:1"></div>
-    </div>
-    """
-
-    batch_js = """
-    <script>
-    (function(){
-      var selectMode = false;
-      function showCheckboxes(show){
-        document.querySelectorAll('.sel-row').forEach(function(cb){
-          cb.style.display = show ? 'inline-block' : 'none';
-          if(!show) cb.checked = false;
-        });
-        var selAll = document.getElementById('select-all');
-        if(selAll) selAll.style.display = show ? 'inline-block' : 'none';
-      }
-      function getSelected(){
-        var vals=[];
-        document.querySelectorAll('.sel-row:checked').forEach(function(cb){ vals.push(cb.value); });
-        return vals;
-      }
-      function post(url, arr){
-        var form = document.createElement('form');
-        form.method='post';
-        form.action=url;
-        arr.forEach(function(v){
-          var i=document.createElement('input'); i.type='hidden'; i.name='selected'; i.value=v; form.appendChild(i);
-        });
-        document.body.appendChild(form);
-        form.submit();
-      }
-      document.addEventListener('click', function(e){
-        var t = e.target;
-        if(!t) return;
-
-        if(t.id === 'edit-selected'){
-          e.preventDefault();
-          if(!selectMode){
-            selectMode = true;
-            showCheckboxes(true);
-            t.textContent = 'Готово — редактировать';
-            return;
-          }
-          var s = getSelected();
-          if(!s.length){ alert('Ничего не выбрано'); return; }
-          post("__EDIT_URL__", s);
-          return;
-        }
-
-        if(t.id === 'select-all'){
-          e.preventDefault();
-          var all = Array.from(document.querySelectorAll('.sel-row'));
-          var anyUnchecked = all.some(function(cb){ return !cb.checked; });
-          all.forEach(function(cb){ cb.checked = anyUnchecked; });
-          return;
-        }
-
-        if(t.id === 'delete-selected'){
-          e.preventDefault();
-          if(!selectMode){
-            selectMode = true;
-            showCheckboxes(true);
-            document.getElementById('edit-selected').textContent = 'Готово — редактировать';
-            t.textContent = 'Удалить выбранные';
-            return;
-          }
-          var s = getSelected();
-          if(!s.length){ alert('Ничего не выбрано'); return; }
-          if(!confirm('Удалить выбранные записи?')) return;
-          post("__DELETE_URL__", s);
-          return;
-        }
-      });
-
-      document.addEventListener('DOMContentLoaded', function(){ showCheckboxes(false); });
-    })();
-    </script>
-    """.replace("__EDIT_URL__", url_for('admin_properties_batch_edit')).replace("__DELETE_URL__", url_for('admin_properties_batch_delete'))
+    action_panel = _render_batch_action_panel()
+    batch_js = _render_batch_js(url_for('admin_properties_batch_edit'), url_for('admin_properties_batch_delete'))
 
     body = f"""
     <h1>Истёкшие слёты</h1>
@@ -1252,58 +1144,48 @@ def admin_properties_batch_edit():
         return redirect(url_for("admin_properties"))
 
     rows = ""
-    # Header labels for clarity in mass edit
-    labels = """
-    <div class="card" style="margin-bottom:8px;padding:10px;color:var(--muted)">
-      <div class="row" style="gap:8px;align-items:center">
-        <div style="width:160px;font-weight:600">Сервер</div>
-        <div style="width:120px;font-weight:600">Тип</div>
-        <div style="width:90px;font-weight:600">PD</div>
-        <div style="width:90px;font-weight:600">D</div>
-        <div style="width:110px;font-weight:600">ID</div>
-        <div style="width:110px;font-weight:600">pos</div>
-        <div style="width:90px;font-weight:600">Порог</div>
-        <div style="width:200px;font-weight:600">Время слёта</div>
-        <div style="width:80px;font-weight:600">Удалить</div>
-      </div>
-    </div>
-    """
     for i, (srv, key, v) in enumerate(entries):
         idx = i
         dt_local = _dt.datetime.fromtimestamp(v.get("expiryTs", 0), tz=MSK_TZ).strftime("%Y-%m-%dT%H:%M") if v.get("expiryTs") else ""
         server_opts = "".join(f'<option value="{s}" {"selected" if s==srv else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS)
         rows += f"""
-        <div class="card" style="margin-bottom:8px">
-          <input type="hidden" name="orig_server_{idx}" value="{srv}">
-          <input type="hidden" name="orig_key_{idx}" value="{key}">
-          <div class="row" style="gap:8px;align-items:center">
-            <select name="server_{idx}" style="width:160px">{server_opts}</select>
-            <select name="propType_{idx}" style="width:120px">
+        <tr>
+          <td>
+            <input type="hidden" name="orig_server_{idx}" value="{srv}">
+            <input type="hidden" name="orig_key_{idx}" value="{key}">
+            <select name="server_{idx}" style="width:150px">{server_opts}</select>
+          </td>
+          <td>
+            <select name="propType_{idx}" style="width:110px">
               <option value="house" {"selected" if v.get("propType")=="house" else ""}>🏠 house</option>
               <option value="business" {"selected" if v.get("propType")=="business" else ""}>🏢 business</option>
             </select>
-            <input type="number" name="pd_{idx}" value="{v.get('pd',0)}" min="1" max="65" style="width:90px" placeholder="PD">
-            <input type="number" name="d_{idx}" value="{v.get('d', DEFAULT_D)}" min="1" style="width:90px" placeholder="D">
-            <input type="text" name="propId_{idx}" value="{v.get('propId') or ''}" placeholder="ID" style="width:110px">
-            <input type="text" name="pos_{idx}" value="{v.get('pos') or ''}" placeholder="pos" style="width:110px">
-            <input type="number" name="dropAt_{idx}" value="{v.get('dropAt') if v.get('dropAt') is not None else ''}" placeholder="Порог" style="width:90px">
-            <input type="datetime-local" name="expiry_{idx}" value="{dt_local}" style="width:200px">
-            <label style="margin-left:6px">Удалить <input type="checkbox" name="delete_{idx}"></label>
-          </div>
-        </div>
+          </td>
+          <td><input type="number" name="pd_{idx}" value="{v.get('pd',0)}" min="1" max="65" style="width:70px"></td>
+          <td><input type="number" name="d_{idx}" value="{v.get('d', DEFAULT_D)}" min="1" style="width:60px"></td>
+          <td><input type="text" name="propId_{idx}" value="{v.get('propId') or ''}" placeholder="ID" style="width:90px"></td>
+          <td><input type="text" name="pos_{idx}" value="{v.get('pos') or ''}" placeholder="pos" style="width:90px"></td>
+          <td><input type="number" name="dropAt_{idx}" value="{v.get('dropAt') if v.get('dropAt') is not None else ''}" placeholder="Порог" style="width:70px"></td>
+          <td><input type="datetime-local" name="expiry_{idx}" value="{dt_local}" style="width:190px"></td>
+          <td style="text-align:center"><input type="checkbox" name="delete_{idx}" style="width:auto"></td>
+        </tr>
         """
 
     form = f"""
     <h1>Массовое редактирование ({len(entries)})</h1>
-    {labels}
-    <form method="post" action="{url_for('admin_properties_batch_update')}">
-      {rows}
-      <input type="hidden" name="count" value="{len(entries)}">
-      <div style="margin-top:10px">
-        <button type="submit">Сохранить все</button>
-        <a href="{url_for('admin_properties')}"><button type="button" class="ghost">Отмена</button></a>
-      </div>
-    </form>
+    <div class="card" style="overflow-x:auto">
+      <form method="post" action="{url_for('admin_properties_batch_update')}">
+        <table>
+          <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>D</th><th>ID</th><th>pos</th><th>Порог</th><th>Время слёта</th><th>Удалить</th></tr>
+          {rows}
+        </table>
+        <input type="hidden" name="count" value="{len(entries)}">
+        <div style="margin-top:16px">
+          <button type="submit">Сохранить все</button>
+          <a href="{url_for('admin_properties')}"><button type="button" class="ghost">Отмена</button></a>
+        </div>
+      </form>
+    </div>
     """
     return render_page("Массовое редактирование", "properties", form)
 
