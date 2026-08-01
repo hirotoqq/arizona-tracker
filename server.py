@@ -57,6 +57,9 @@ MSK_OFFSET = 3 * 3600
 DEFAULT_DROP_AT_HOUSE = 1
 DEFAULT_DROP_AT_BIZ   = 1
 
+# Новый: дефолтное значение D (сколько отнимается PD в час)
+DEFAULT_D = 1
+
 SERVER_DROP_AT_HOUSE = {
     "Phoenix": 2, "Tucson": 2, "Scottdale": 2, "Chandler": 2,
     "Brainburg": 2, "Saint-Rose": 2, "Mesa": 2, "Red-Rock": 2,
@@ -80,7 +83,7 @@ SERVER_DROP_AT_BIZ = {
 }
 
 def get_drop_at(server, prop_type):
-    """Текущее значение 'Дроп' для сервера/типа: сначала из настроек в Firebase,
+    """Текущее значение 'Порог' для сервера/типа: сначала из настроек в Firebase,
     иначе — значение по умолчанию (как захардкожено в скрипте)."""
     try:
         cfg = db.reference(f"config/dropAt/{server}/{prop_type}").get()
@@ -107,7 +110,7 @@ def calc_expiry_ts(pd, drop_at, now=None):
     return future_msk - MSK_OFFSET
 
 def calc_expiry_from_pdl(pd, d, l, now=None):
-    """Формула по P/D/L (не связана с 'Дропом'):
+    """Формула по P/D/L (D — сколько отнимается каждый час, L — порог):
     P — текущий Payday, D — на сколько Payday уменьшается каждый час,
     L — порог слёта (Payday, при достижении которого дом упадёт на след. час).
     hoursLeft = floor((P - L) / D) + 1, время округляется вниз до часа по МСК."""
@@ -217,6 +220,7 @@ def update():
         prop_id = e.get("propId")
         pos     = e.get("pos")
         drop_at = e.get("dropAt")
+        d_val   = e.get("d", DEFAULT_D)
 
         # Если есть ID — храним каждый объект отдельно
         if prop_id:
@@ -230,6 +234,7 @@ def update():
                 "propId":   prop_id,
                 "pos":      pos,
                 "dropAt":   drop_at,
+                "d":        int(d_val) if isinstance(d_val, (int, float, str)) and str(d_val).isdigit() else DEFAULT_D,
                 "count":    1,
             }
         else:
@@ -245,6 +250,7 @@ def update():
                     "propId":   None,
                     "pos":      pos,
                     "dropAt":   drop_at,
+                    "d":        int(d_val) if isinstance(d_val, (int, float, str)) and str(d_val).isdigit() else DEFAULT_D,
                     "count":    1,
                 }
         written += 1
@@ -769,7 +775,7 @@ def admin_settings():
     <h1>Настройки расчёта слётов</h1>
     <div class="card">
       <p style="color:var(--muted);margin-top:0">
-        «Дроп» — через сколько PD-часов происходит слёт на сервере (как в скрипте property_tracker.lua).
+        «Порог» — Payday, при достижении которого дом упадёт на следующий час (раньше назывался «Дроп»).
         Эти значения используются по умолчанию при добавлении и редактировании записей на вкладках «Слёты» и «Истёкшие».
       </p>
       <form method="post" action="{url_for('admin_settings_save')}">
@@ -825,9 +831,11 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
         drop_default = drop_val if drop_val is not None else get_drop_at(srv, v.get("propType", "house"))
         drop_display = str(drop_default) + ('' if drop_val is not None else ' <span style="color:var(--muted)">(по умолч.)</span>')
 
+        d_val = v.get("d", DEFAULT_D)
+
         rows += (
             f"<tr id='view-{row_id}'><td>{server_label(srv)}</td><td>{v.get('propType','?')}</td><td>{v.get('pd','—')}</td>"
-            f"<td>{v.get('propId') or v.get('pos') or '—'}</td><td>{drop_display}</td><td>{when}</td><td>{status}</td><td class='row'>{edit_btn}{del_btn}</td></tr>"
+            f"<td>{d_val}</td><td>{v.get('propId') or v.get('pos') or '—'}</td><td>{drop_display}</td><td>{when}</td><td>{status}</td><td class='row'>{edit_btn}{del_btn}</td></tr>"
         )
 
         server_opts = "".join(
@@ -836,7 +844,7 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
         )
         rows += f"""
         <tr id='edit-{row_id}' style='display:none'>
-          <td colspan='8'>
+          <td colspan='9'>
             <form method="post" action="{url_for('admin_property_update', server=srv, key=k)}" class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
               <input type="hidden" name="back" value="{back_endpoint}">
               <select name="server">{server_opts}</select>
@@ -845,15 +853,18 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
                 <option value="business" {"selected" if v.get("propType")=="business" else ""}>🏢 business</option>
               </select>
               <input type="number" name="pd" value="{v.get('pd', 0)}" min="1" max="65" required style="width:90px" title="PayDay">
-              <label style="color:var(--muted);font-size:13px">Дроп
-                <input type="number" name="dropAt" value="{drop_default}" min="0" max="10" style="width:70px" title="Через сколько PD-часов происходит слёт">
+              <label style="color:var(--muted);font-size:13px">Сколько отнимается
+                <input type="number" name="d" value="{v.get('d', DEFAULT_D)}" min="1" style="width:80px" title="Сколько PD отнимается каждый час (D)">
               </label>
-              <input type="datetime-local" name="expiry" value="{dt_local}" title="Используется, если поле 'Дроп' пустое">
               <input type="text" name="propId" placeholder="ID" value="{v.get('propId') or ''}" style="width:120px">
+              <label style="color:var(--muted);font-size:13px">Порог
+                <input type="number" name="dropAt" value="{drop_default if v.get('dropAt') is not None else ''}" min="0" max="10" style="width:70px" title="Порог L (Payday), при достижении — дом слетит)">
+              </label>
+              <input type="datetime-local" name="expiry" value="{dt_local}" title="Используется, если поле 'Порог' пустое">
               <input type="text" name="pos" placeholder="Позиция" value="{v.get('pos') or ''}" style="width:120px">
               <button type="submit">Сохранить</button>
               <button type="button" class="ghost" onclick="toggleEdit('{row_id}')">Отмена</button>
-              <div style="width:100%;color:var(--muted);font-size:12px">Если указан «Дроп» — время слёта пересчитается автоматически по PD и Дропу (как в скрипте). Если оставить «Дроп» пустым — используется дата из поля справа.</div>
+              <div style="width:100%;color:var(--muted);font-size:12px">Если указан «Порог» — время слёта пересчитается автоматически по PD/D/L (формула). Если оставить «Порог» пустым — используется дата из поля справа.</div>
             </form>
           </td>
         </tr>"""
@@ -913,13 +924,14 @@ def admin_properties():
           <option value="business">🏢 business</option>
         </select>
         <input type="number" name="pd" placeholder="PayDay" min="1" max="65" required style="width:100px">
-        <label style="color:var(--muted);font-size:13px">Дроп
-          <input type="number" name="dropAt" placeholder="напр. 2" min="0" max="10" style="width:70px" title="Если указано — время слёта рассчитается по PD и Дропу, как в скрипте">
+        <input type="number" name="d" placeholder="Сколько отнимается (D)" min="1" value="{DEFAULT_D}" style="width:140px">
+        <label style="color:var(--muted);font-size:13px">Порог
+          <input type="number" name="dropAt" placeholder="напр. 1" min="0" max="10" style="width:70px" title="Если указан — время слёта рассчитается по PD/D/L">
         </label>
-        <input type="number" name="hours" placeholder="Часов до слёта (если без Дропа)" min="0" step="0.1" style="width:220px">
+        <input type="number" name="hours" placeholder="Часов до слёта (если без Порога)" min="0" step="0.1" style="width:220px">
         <input type="text" name="propId" placeholder="ID (необязательно)" style="width:150px">
         <button type="submit">Добавить</button>
-        <div style="width:100%;color:var(--muted);font-size:12px">Заполните либо «Дроп» (время посчитается автоматически по формуле из скрипта), либо «Часов до слёта» вручную.</div>
+        <div style="width:100%;color:var(--muted);font-size:12px">Заполните либо «Порог» (L) и «Сколько отнимается» (D) — время посчитается автоматически по формуле P/D/L, либо укажите «Часов до слёта» вручную.</div>
       </form>
     </div>
     <div class="card row">
@@ -930,8 +942,8 @@ def admin_properties():
       </form>
     </div>
     <table>
-      <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>ID/поз.</th><th>Дроп</th><th>Слёт</th><th>Статус</th><th></th></tr>
-      {rows or "<tr><td colspan='8'>Записей нет</td></tr>"}
+      <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>Сколько отнимается</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
+      {rows or "<tr><td colspan='9'>Записей нет</td></tr>"}
     </table>
     {TOGGLE_EDIT_SCRIPT}"""
     return render_page("Слёты", "properties", body)
@@ -961,8 +973,8 @@ def admin_expired():
       </form>
     </div>
     <table>
-      <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>ID/поз.</th><th>Дроп</th><th>Слёт</th><th>Статус</th><th></th></tr>
-      {rows or "<tr><td colspan='8'>Истёкших записей нет</td></tr>"}
+      <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>Сколько отнимается</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
+      {rows or "<tr><td colspan='9'>Истёкших записей нет</td></tr>"}
     </table>
     {TOGGLE_EDIT_SCRIPT}"""
     return render_page("Истёкшие", "expired", body)
@@ -982,6 +994,14 @@ def admin_property_add():
         flash_msg("err", "Неверное значение PayDay")
         return redirect(url_for("admin_properties"))
 
+    # Новый: парсим D (сколько отнимается)
+    d_raw = request.form.get("d", "").strip()
+    try:
+        d_val = int(d_raw) if d_raw != "" else DEFAULT_D
+    except ValueError:
+        flash_msg("err", "Неверное значение 'Сколько отнимается'")
+        return redirect(url_for("admin_properties"))
+
     if server not in VALID_SERVERS or prop_type not in ("house", "business"):
         flash_msg("err", "Неверный сервер или тип")
         return redirect(url_for("admin_properties"))
@@ -996,9 +1016,12 @@ def admin_property_add():
         try:
             drop_at = int(drop_raw)
         except ValueError:
-            flash_msg("err", "Неверное значение Дроп")
+            flash_msg("err", "Неверное значение Порог")
             return redirect(url_for("admin_properties"))
-        expiry_h = calc_expiry_ts(pd, drop_at, now)
+        if d_val <= 0:
+            flash_msg("err", "Значение 'Сколько отнимается' должно быть >=1")
+            return redirect(url_for("admin_properties"))
+        expiry_h = calc_expiry_from_pdl(pd, d_val, drop_at, now)
     elif hours_raw:
         try:
             hours = float(hours_raw)
@@ -1010,14 +1033,14 @@ def admin_property_add():
             return redirect(url_for("admin_properties"))
         expiry_h = ((now + int(hours * 3600)) // 3600) * 3600
     else:
-        flash_msg("err", "Укажите «Дроп» или «Часов до слёта»")
+        flash_msg("err", "Укажите «Порог» и/или «Сколько отнимается» или «Часов до слёта»")
         return redirect(url_for("admin_properties"))
 
     key = f"{prop_type}_{prop_id}" if prop_id else f"{prop_type}_{expiry_h}_admin_{secrets.token_hex(3)}"
 
     db.reference(f"properties/{server}/{key}").set({
         "server": server, "propType": prop_type, "pd": pd, "expiryTs": expiry_h,
-        "scanTs": now, "propId": prop_id or None, "pos": None, "dropAt": drop_at, "count": 1,
+        "scanTs": now, "propId": prop_id or None, "pos": None, "dropAt": drop_at, "d": d_val, "count": 1,
     })
     flash_msg("ok", "Запись добавлена")
     return redirect(url_for("admin_properties"))
@@ -1066,7 +1089,11 @@ def admin_property_edit(server, key):
           <input type="number" name="pd" value="{v.get('pd', 0)}" min="1" max="65" required>
         </div>
         <div class="row" style="margin-bottom:10px">
-          <label style="width:140px;color:var(--muted)">Дроп</label>
+          <label style="width:140px;color:var(--muted)">Сколько отнимается (D)</label>
+          <input type="number" name="d" value="{v.get('d', DEFAULT_D)}" min="1">
+        </div>
+        <div class="row" style="margin-bottom:10px">
+          <label style="width:140px;color:var(--muted)">Порог</label>
           <input type="number" name="dropAt" value="{v.get('dropAt') if v.get('dropAt') is not None else ''}" min="0" max="10" placeholder="если пусто — используется дата ниже">
         </div>
         <div class="row" style="margin-bottom:10px">
@@ -1105,10 +1132,18 @@ def admin_property_update(server, key):
     pos        = request.form.get("pos", "").strip()
     expiry_str = request.form.get("expiry", "")
     drop_raw   = request.form.get("dropAt", "").strip()
+    d_raw      = request.form.get("d", "").strip()
     try:
         pd = int(request.form.get("pd", 0))
     except ValueError:
         flash_msg("err", "Неверный PD")
+        return redirect(url_for("admin_property_edit", server=server, key=key))
+
+    # парсим D
+    try:
+        d_val = int(d_raw) if d_raw != "" else old.get("d", DEFAULT_D)
+    except ValueError:
+        flash_msg("err", "Неверное значение 'Сколько отнимается'")
         return redirect(url_for("admin_property_edit", server=server, key=key))
 
     if new_server not in VALID_SERVERS or prop_type not in ("house", "business"):
@@ -1123,9 +1158,12 @@ def admin_property_update(server, key):
         try:
             drop_at = int(drop_raw)
         except ValueError:
-            flash_msg("err", "Неверное значение Дроп")
+            flash_msg("err", "Неверное значение Порог")
             return redirect(url_for("admin_property_edit", server=server, key=key))
-        expiry_ts = calc_expiry_ts(pd, drop_at)
+        if d_val <= 0:
+            flash_msg("err", "Значение 'Сколько отнимается' должно быть >=1")
+            return redirect(url_for("admin_property_edit", server=server, key=key))
+        expiry_ts = calc_expiry_from_pdl(pd, d_val, drop_at)
     else:
         try:
             import datetime as _dt
@@ -1143,6 +1181,7 @@ def admin_property_update(server, key):
         "propId":   prop_id or None,
         "pos":      pos or None,
         "dropAt":   drop_at if drop_at is not None else old.get("dropAt"),
+        "d":        d_val if d_val is not None else old.get("d", DEFAULT_D),
     })
 
     if new_server != server:
