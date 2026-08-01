@@ -336,7 +336,128 @@ button.ghost{background:transparent;border:1px solid var(--border);color:var(--t
 .login-box button{width:100%}
 .mono{font-family:'Consolas','Courier New',monospace}
 form.inline{display:inline}
+#load-bar{position:fixed;top:0;left:0;height:2px;width:0;background:var(--accent);z-index:9999;transition:width .2s ease,opacity .3s ease;opacity:0}
+#load-bar.active{opacity:1}
+#page-content{animation:pageFadeIn .22s ease}
+@keyframes pageFadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
 </style>
+"""
+
+NAV_SCRIPT = """
+<div id="load-bar"></div>
+<script>
+(function(){
+  var bar = document.getElementById('load-bar');
+  var content = document.getElementById('page-content');
+  var barTimer = null;
+
+  function showBar(){
+    clearTimeout(barTimer);
+    bar.style.width = '0%';
+    bar.classList.add('active');
+    requestAnimationFrame(function(){ bar.style.width = '70%'; });
+  }
+  function hideBar(){
+    bar.style.width = '100%';
+    barTimer = setTimeout(function(){
+      bar.classList.remove('active');
+      bar.style.width = '0%';
+    }, 200);
+  }
+
+  function execScripts(container){
+    var scripts = container.querySelectorAll('script');
+    scripts.forEach(function(old){
+      var s = document.createElement('script');
+      for (var i=0;i<old.attributes.length;i++){
+        s.setAttribute(old.attributes[i].name, old.attributes[i].value);
+      }
+      s.textContent = old.textContent;
+      old.parentNode.replaceChild(s, old);
+    });
+  }
+
+  function swap(html, url){
+    var doc = new DOMParser().parseFromString(html, 'text/html');
+    var newContent = doc.getElementById('page-content');
+    if (!newContent){ window.location.href = url; return; }
+
+    var newTitle = doc.querySelector('title');
+    if (newTitle) document.title = newTitle.textContent;
+
+    content.innerHTML = newContent.innerHTML;
+    content.style.animation = 'none';
+    void content.offsetWidth;
+    content.style.animation = '';
+
+    var newNav = doc.querySelector('.nav');
+    if (newNav){
+      document.querySelectorAll('.nav a').forEach(function(a){ a.classList.remove('active'); });
+      var activeA = newNav.querySelector('a.active');
+      if (activeA){
+        var href = activeA.getAttribute('href');
+        document.querySelectorAll('.nav a').forEach(function(a){
+          if (a.getAttribute('href') === href) a.classList.add('active');
+        });
+      }
+    }
+    execScripts(content);
+    window.scrollTo(0,0);
+  }
+
+  function go(url, opts, push){
+    push = push !== false;
+    showBar();
+    fetch(url, Object.assign({headers:{'X-Requested-With':'fetch'}}, opts||{}))
+      .then(function(r){
+        var finalUrl = r.url || url;
+        return r.text().then(function(html){ return {html:html, url:finalUrl, ok:r.ok}; });
+      })
+      .then(function(res){
+        hideBar();
+        if (!res.ok){ window.location.href = res.url; return; }
+        swap(res.html, res.url);
+        if (push) history.pushState({url:res.url}, '', res.url);
+      })
+      .catch(function(){ hideBar(); window.location.href = url; });
+  }
+
+  document.addEventListener('click', function(e){
+    var a = e.target.closest('a[href]');
+    if (!a) return;
+    if (a.hasAttribute('download') || a.target === '_blank') return;
+    var href = a.getAttribute('href');
+    if (!href || href.startsWith('#') || href.startsWith('mailto:') || href.startsWith('tel:') || href.startsWith('javascript:')) return;
+    var url;
+    try { url = new URL(href, window.location.href); } catch(err) { return; }
+    if (url.origin !== window.location.origin) return;
+    e.preventDefault();
+    go(url.href);
+  });
+
+  document.addEventListener('submit', function(e){
+    if (e.defaultPrevented) return;
+    var form = e.target;
+    if (!form || form.tagName !== 'FORM') return;
+    var method = (form.getAttribute('method') || 'GET').toUpperCase();
+    var action = form.getAttribute('action') || window.location.href;
+    var url;
+    try { url = new URL(action, window.location.href); } catch(err) { return; }
+    if (url.origin !== window.location.origin) return;
+    e.preventDefault();
+    if (method === 'GET'){
+      url.search = new URLSearchParams(new FormData(form)).toString();
+      go(url.href);
+    } else {
+      go(url.href, {method:'POST', body:new FormData(form)});
+    }
+  });
+
+  window.addEventListener('popstate', function(){
+    go(window.location.href, {}, false);
+  });
+})();
+</script>
 """
 
 def render_page(title, active, body):
@@ -360,7 +481,8 @@ def render_page(title, active, body):
   <span class="spacer"></span>
   <a href="{url_for('admin_logout')}">Выйти</a>
 </div>
-<div class="wrap">{flashes}{body}</div>
+<div class="wrap" id="page-content"><div id="flashes">{flashes}</div>{body}</div>
+{NAV_SCRIPT}
 </body></html>"""
 
 def flash_msg(kind, msg):
@@ -685,8 +807,8 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
         edit_btn = f'<button class="ghost" type="button" onclick="toggleEdit(\'{row_id}\')">Изменить</button>'
 
         drop_val = v.get("dropAt")
-        drop_display = drop_val if drop_val is not None else "—"
         drop_default = drop_val if drop_val is not None else get_drop_at(srv, v.get("propType", "house"))
+        drop_display = str(drop_default) + ('' if drop_val is not None else ' <span style="color:var(--muted)">(по умолч.)</span>')
 
         rows += (
             f"<tr id='view-{row_id}'><td>{server_label(srv)}</td><td>{v.get('propType','?')}</td><td>{v.get('pd','—')}</td>"
@@ -787,7 +909,7 @@ def admin_properties():
     </div>
     <div class="card row">
       <form method="get">
-        <select name="server" onchange="this.form.submit()">
+        <select name="server" onchange="this.form.requestSubmit()">
           <option value="">Все серверы</option>{server_options}
         </select>
       </form>
@@ -818,7 +940,7 @@ def admin_expired():
     <h1>Истёкшие слёты</h1>
     <div class="card row">
       <form method="get">
-        <select name="server" onchange="this.form.submit()">
+        <select name="server" onchange="this.form.requestSubmit()">
           <option value="">Все серверы</option>{server_options}
         </select>
       </form>
