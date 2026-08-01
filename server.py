@@ -843,10 +843,14 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
 
         d_val = v.get("d", DEFAULT_D)
 
-        # Компактная строка (меньше колонок): Сервер | Тип | PD | D | ID/pos | Порог | Слёт | Статус | Действия
+        # Checkbox cell added (value: server|key)
+        checkbox = f'<input type="checkbox" class="sel-row" name="selected" value="{srv}|{k}">'
+
         rows += (
-            f"<tr id='view-{row_id}'><td>{server_label(srv)}</td><td>{v.get('propType','?')}</td><td>{v.get('pd','—')}</td>"
-            f"<td>{d_val}</td><td>{v.get('propId') or v.get('pos') or '—'}</td><td>{drop_display}</td><td>{when}</td><td>{status}</td><td class='row'>{edit_btn}{del_btn}</td></tr>"
+            f"<tr id='view-{row_id}'><td style='width:36px'>{checkbox}</td>"
+            f"<td>{server_label(srv)}</td><td>{v.get('propType','?')}</td><td>{v.get('pd','—')}</td>"
+            f"<td>{d_val}</td><td>{v.get('propId') or v.get('pos') or '—'}</td><td>{drop_display}</td>"
+            f"<td>{when}</td><td>{status}</td><td class='row'>{edit_btn}{del_btn}</td></tr>"
         )
 
         server_opts = "".join(
@@ -855,7 +859,7 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
         )
         rows += f"""
         <tr id='edit-{row_id}' style='display:none'>
-          <td colspan='9'>
+          <td colspan='10'>
             <form method="post" action="{url_for('admin_property_update', server=srv, key=k)}" class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
               <input type="hidden" name="back" value="{back_endpoint}">
               <select name="server">{server_opts}</select>
@@ -864,7 +868,7 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
                 <option value="business" {"selected" if v.get("propType")=="business" else ""}>🏢 business</option>
               </select>
               <input type="number" name="pd" value="{v.get('pd', 0)}" min="1" max="65" required style="width:90px" title="PayDay">
-              <label style="color:var(--muted);font-size:13px">Сколько отнимается
+              <label style="color:var(--muted);font-size:13px">D
                 <input type="number" name="d" value="{v.get('d', DEFAULT_D)}" min="1" style="width:80px" title="Сколько PD отнимается каждый час (D)">
               </label>
               <input type="text" name="propId" placeholder="ID" value="{v.get('propId') or ''}" style="width:120px">
@@ -875,7 +879,6 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
               <input type="text" name="pos" placeholder="Позиция" value="{v.get('pos') or ''}" style="width:120px">
               <button type="submit">Сохранить</button>
               <button type="button" class="ghost" onclick="toggleEdit('{row_id}')">Отмена</button>
-              <div style="width:100%;color:var(--muted);font-size:12px">Если указан «Порог» — время слёта пересчитается автоматически по PD/D/L (формула). Если оставить «Порог» пустым — используется дата из поля справа.</div>
             </form>
           </td>
         </tr>"""
@@ -909,7 +912,6 @@ TOGGLE_EDIT_SCRIPT = """
     }
     </script>"""
 
-
 @app.route("/admin/properties")
 @login_required
 def admin_properties():
@@ -924,6 +926,45 @@ def admin_properties():
     server_options = "".join(
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
     )
+
+    action_panel = f"""
+    <div class="card row" style="align-items:center">
+      <button id="select-all" class="ghost">Выбрать всё</button>
+      <button id="edit-selected">Изменить выбранные</button>
+      <button id="delete-selected" class="danger">Удалить выбранные</button>
+      <div style="flex:1"></div>
+    </div>
+    """
+
+    # JS для массовых операций: используем url_for внутри f-string (в контексте запроса)
+    batch_js = f"""
+    <script>
+    (function(){
+      function getSelected(){
+        var vals=[];
+        document.querySelectorAll('.sel-row:checked').forEach(function(cb){ vals.push(cb.value); });
+        return vals;
+      }
+      function post(url, arr){
+        var form = document.createElement('form');
+        form.method='post';
+        form.action=url;
+        arr.forEach(function(v){
+          var i=document.createElement('input'); i.type='hidden'; i.name='selected'; i.value=v; form.appendChild(i);
+        });
+        document.body.appendChild(form);
+        form.submit();
+      }
+      document.addEventListener('click', function(e){
+        if(!e.target) return;
+        if(e.target.id==='select-all'){ e.preventDefault(); var all=document.querySelectorAll('.sel-row'); var allChecked=true; all.forEach(function(cb){ if(!cb.checked) allChecked=false; }); all.forEach(function(cb){ cb.checked = !allChecked; }); }
+        if(e.target.id==='edit-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } post('{url_for('admin_properties_batch_edit')}', s); }
+        if(e.target.id==='delete-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } if(!confirm('Удалить выбранные записи?')) return; post('{url_for('admin_properties_batch_delete')}', s); }
+      });
+    })();
+    </script>
+    """
+
     body = f"""
     <h1>Данные о слётах</h1>
     <div class="card">
@@ -952,11 +993,14 @@ def admin_properties():
         </select>
       </form>
     </div>
+    {action_panel}
     <table>
-      <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>Сколько отнимается</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
-      {rows or "<tr><td colspan='9'>Записей нет</td></tr>"}
+      <tr><th style="width:36px"></th><th>Сервер</th><th>Тип</th><th>PD</th><th>Сколько отнимается</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
+      {rows or "<tr><td colspan='10'>Записей нет</td></tr>"}
     </table>
-    {TOGGLE_EDIT_SCRIPT}"""
+    {batch_js}
+    {TOGGLE_EDIT_SCRIPT}
+    """
     return render_page("Слёты", "properties", body)
 
 
@@ -974,6 +1018,44 @@ def admin_expired():
     server_options = "".join(
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
     )
+
+    action_panel = f"""
+    <div class="card row" style="align-items:center">
+      <button id="select-all" class="ghost">Выбрать всё</button>
+      <button id="edit-selected">Изменить выбранные</button>
+      <button id="delete-selected" class="danger">Удалить выбранные</button>
+      <div style="flex:1"></div>
+    </div>
+    """
+
+    batch_js = f"""
+    <script>
+    (function(){
+      function getSelected(){
+        var vals=[];
+        document.querySelectorAll('.sel-row:checked').forEach(function(cb){ vals.push(cb.value); });
+        return vals;
+      }
+      function post(url, arr){
+        var form = document.createElement('form');
+        form.method='post';
+        form.action=url;
+        arr.forEach(function(v){
+          var i=document.createElement('input'); i.type='hidden'; i.name='selected'; i.value=v; form.appendChild(i);
+        });
+        document.body.appendChild(form);
+        form.submit();
+      }
+      document.addEventListener('click', function(e){
+        if(!e.target) return;
+        if(e.target.id==='select-all'){ e.preventDefault(); var all=document.querySelectorAll('.sel-row'); var allChecked=true; all.forEach(function(cb){ if(!cb.checked) allChecked=false; }); all.forEach(function(cb){ cb.checked = !allChecked; }); }
+        if(e.target.id==='edit-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } post('{url_for('admin_properties_batch_edit')}', s); }
+        if(e.target.id==='delete-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } if(!confirm('Удалить выбранные записи?')) return; post('{url_for('admin_properties_batch_delete')}', s); }
+      });
+    })();
+    </script>
+    """
+
     body = f"""
     <h1>Истёкшие слёты</h1>
     <div class="card row">
@@ -983,10 +1065,12 @@ def admin_expired():
         </select>
       </form>
     </div>
+    {action_panel}
     <table>
-      <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>Сколько отнимается</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
-      {rows or "<tr><td colspan='9'>Истёкших записей нет</td></tr>"}
+      <tr><th style="width:36px"></th><th>Сервер</th><th>Тип</th><th>PD</th><th>Сколько отнимается</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
+      {rows or "<tr><td colspan='10'>Истёкших записей нет</td></tr>"}
     </table>
+    {batch_js}
     {TOGGLE_EDIT_SCRIPT}"""
     return render_page("Истёкшие", "expired", body)
 
@@ -1066,6 +1150,165 @@ def admin_property_delete(server, key):
     flash_msg("ok", "Запись удалена")
     return redirect(url_for(back))
 
+@app.route("/admin/properties/batch_edit", methods=["POST"])
+@login_required
+def admin_properties_batch_edit():
+    selected = request.form.getlist("selected")
+    if not selected:
+        flash_msg("err", "Ничего не выбрано")
+        return redirect(url_for("admin_properties"))
+    entries = []
+    for s in selected:
+        try:
+            srv, key = s.split("|", 1)
+        except Exception:
+            continue
+        v = db.reference(f"properties/{srv}/{key}").get()
+        if not v or not isinstance(v, dict):
+            continue
+        entries.append((srv, key, v))
+    if not entries:
+        flash_msg("err", "Выбранные записи не найдены")
+        return redirect(url_for("admin_properties"))
+
+    # Построим форму массового редактирования
+    rows = ""
+    for i, (srv, key, v) in enumerate(entries):
+        idx = i
+        dt_local = _dt.datetime.fromtimestamp(v.get("expiryTs", 0), tz=MSK_TZ).strftime("%Y-%m-%dT%H:%M") if v.get("expiryTs") else ""
+        server_opts = "".join(f'<option value="{s}" {"selected" if s==srv else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS)
+        rows += f"""
+        <div class="card" style="margin-bottom:8px">
+          <input type="hidden" name="orig_server_{idx}" value="{srv}">
+          <input type="hidden" name="orig_key_{idx}" value="{key}">
+          <div class="row" style="gap:8px;align-items:center">
+            <select name="server_{idx}" style="width:160px">{server_opts}</select>
+            <select name="propType_{idx}" style="width:120px">
+              <option value="house" {"selected" if v.get("propType")=="house" else ""}>🏠 house</option>
+              <option value="business" {"selected" if v.get("propType")=="business" else ""}>🏢 business</option>
+            </select>
+            <input type="number" name="pd_{idx}" value="{v.get('pd',0)}" min="1" max="65" style="width:90px" placeholder="PD">
+            <input type="number" name="d_{idx}" value="{v.get('d', DEFAULT_D)}" min="1" style="width:90px" placeholder="D">
+            <input type="text" name="propId_{idx}" value="{v.get('propId') or ''}" placeholder="ID" style="width:110px">
+            <input type="text" name="pos_{idx}" value="{v.get('pos') or ''}" placeholder="pos" style="width:110px">
+            <input type="number" name="dropAt_{idx}" value="{v.get('dropAt') if v.get('dropAt') is not None else ''}" placeholder="Порог" style="width:90px">
+            <input type="datetime-local" name="expiry_{idx}" value="{dt_local}" style="width:200px">
+            <label style="margin-left:6px">Удалить <input type="checkbox" name="delete_{idx}"></label>
+          </div>
+        </div>
+        """
+
+    form = f"""
+    <h1>Массовое редактирование ({len(entries)})</h1>
+    <form method="post" action="{url_for('admin_properties_batch_update')}">
+      {rows}
+      <input type="hidden" name="count" value="{len(entries)}">
+      <div style="margin-top:10px">
+        <button type="submit">Сохранить все</button>
+        <a href="{url_for('admin_properties')}"><button type="button" class="ghost">Отмена</button></a>
+      </div>
+    </form>
+    """
+    return render_page("Массовое редактирование", "properties", form)
+
+@app.route("/admin/properties/batch_update", methods=["POST"])
+@login_required
+def admin_properties_batch_update():
+    try:
+        count = int(request.form.get("count", 0))
+    except ValueError:
+        count = 0
+    now = int(time.time())
+    updated = 0
+    deleted = 0
+    for i in range(count):
+        sidx = str(i)
+        orig_server = request.form.get(f"orig_server_{sidx}")
+        orig_key = request.form.get(f"orig_key_{sidx}")
+        if not orig_key or not orig_server:
+            continue
+        if request.form.get(f"delete_{sidx}") == "on":
+            db.reference(f"properties/{orig_server}/{orig_key}").delete()
+            deleted += 1
+            continue
+
+        new_server = request.form.get(f"server_{sidx}", orig_server)
+        prop_type = request.form.get(f"propType_{sidx}", "house")
+        try:
+            pd = int(request.form.get(f"pd_{sidx}", 0))
+        except Exception:
+            pd = 0
+        try:
+            d_val = int(request.form.get(f"d_{sidx}", DEFAULT_D))
+        except Exception:
+            d_val = DEFAULT_D
+        prop_id = request.form.get(f"propId_{sidx}", "").strip() or None
+        pos = request.form.get(f"pos_{sidx}", "").strip() or None
+        drop_raw = request.form.get(f"dropAt_{sidx}", "").strip()
+        expiry_str = request.form.get(f"expiry_{sidx}", "").strip()
+
+        # compute expiry_ts
+        if drop_raw:
+            try:
+                drop_at = int(drop_raw)
+                expiry_ts = calc_expiry_from_pdl(pd, d_val, drop_at)
+            except Exception:
+                expiry_ts = int(now)
+                drop_at = None
+        else:
+            # parse datetime-local as MSK
+            if expiry_str:
+                try:
+                    dt = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M")
+                    expiry_ts = int(dt.replace(tzinfo=MSK_TZ).timestamp())
+                except Exception:
+                    expiry_ts = int(now)
+            else:
+                expiry_ts = int(now)
+            drop_at = None
+
+        new_record = {
+            "server": new_server,
+            "propType": prop_type,
+            "pd": pd,
+            "expiryTs": expiry_ts,
+            "scanTs": now,
+            "propId": prop_id,
+            "pos": pos,
+            "dropAt": drop_at,
+            "d": d_val,
+            "count": 1,
+        }
+
+        # write to DB (move if server changed)
+        if new_server != orig_server:
+            db.reference(f"properties/{orig_server}/{orig_key}").delete()
+            db.reference(f"properties/{new_server}/{orig_key}").set(new_record)
+        else:
+            db.reference(f"properties/{orig_server}/{orig_key}").set(new_record)
+        updated += 1
+
+    flash_msg("ok", f"Обновлено: {updated}, удалено: {deleted}")
+    return redirect(url_for("admin_properties"))
+
+@app.route("/admin/properties/batch_delete", methods=["POST"])
+@login_required
+def admin_properties_batch_delete():
+    selected = request.form.getlist("selected")
+    if not selected:
+        flash_msg("err", "Ничего не выбрано")
+        return redirect(url_for("admin_properties"))
+    deleted = 0
+    for s in selected:
+        try:
+            srv, key = s.split("|", 1)
+        except Exception:
+            continue
+        db.reference(f"properties/{srv}/{key}").delete()
+        deleted += 1
+    flash_msg("ok", f"Удалено: {deleted}")
+    return redirect(url_for("admin_properties"))
+
 @app.route("/admin/properties/<server>/<key>/edit", methods=["GET"])
 @login_required
 def admin_property_edit(server, key):
@@ -1086,7 +1329,7 @@ def admin_property_edit(server, key):
       <form method="post" action="{url_for('admin_property_update', server=server, key=key)}">
         <div class="row" style="margin-bottom:10px">
           <label style="width:140px;color:var(--muted)">Сервер</label>
-          <select name="server" required>{server_options}</select>
+          <select name="server" required>{server_opts:=server_options}</select>
         </div>
         <div class="row" style="margin-bottom:10px">
           <label style="width:140px;color:var(--muted)">Тип</label>
