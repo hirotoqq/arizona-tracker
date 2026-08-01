@@ -313,7 +313,7 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
 
         tree_lines.append("")
 
-    block = "```\n" + "\n".join(tree_lines) + "\n```"
+    block = "<blockquote expandable>" + "\n".join(tree_lines) + "</blockquote>"
     # Убираем HTML теги из заголовка — используем Markdown
     header = f"*{title}*\n"
     if stats_str:
