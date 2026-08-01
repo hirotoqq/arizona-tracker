@@ -7,6 +7,7 @@ from functools import wraps
 from datetime import timedelta
 import requests
 import datetime as _dt
+from werkzeug.security import generate_password_hash, check_password_hash
 
 app = Flask(__name__)
 
@@ -308,12 +309,47 @@ def get_time():
 
 # ADMIN PANEL
 def login_required(f):
+    """Пускает любого залогиненного — и админа, и редактора."""
     @wraps(f)
     def wrapper(*args, **kwargs):
         if not session.get("admin_logged_in"):
             return redirect(url_for("admin_login"))
         return f(*args, **kwargs)
     return wrapper
+
+def admin_only(f):
+    """Пускает только главного админа — редакторам сюда нельзя."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get("admin_logged_in"):
+            return redirect(url_for("admin_login"))
+        if session.get("role") != "admin":
+            flash_msg("err", "Недостаточно прав для этого раздела")
+            return redirect(url_for("admin_properties"))
+        return f(*args, **kwargs)
+    return wrapper
+
+def current_role():
+    return session.get("role", "admin")
+
+def is_admin_role():
+    return current_role() == "admin"
+
+def allowed_servers_for_current_user():
+    """Множество серверов, которые текущий пользователь может видеть/редактировать.
+    Для админа — все, для редактора — только назначенные ему."""
+    if is_admin_role():
+        return set(VALID_SERVERS)
+    return set(session.get("editor_servers", []))
+
+def find_editor_by_username(username):
+    data = db.reference("editors").get() or {}
+    for eid, e in data.items():
+        if isinstance(e, dict) and e.get("username", "").lower() == username.strip().lower():
+            e = dict(e)
+            e["id"] = eid
+            return e
+    return None
 
 BASE_CSS = """
 <style>
@@ -493,10 +529,14 @@ NAV_SCRIPT = """
 """
 
 def render_page(title, active, body):
-    nav_items = [
-        ("dashboard", "Дашборд"), ("keys", "Ключи"), ("users", "Пользователи"),
-        ("properties", "Слёты"), ("expired", "Истёкшие"), ("settings", "Настройки"), ("broadcast", "Рассылка"),
-    ]
+    if current_role() == "editor":
+        nav_items = [("properties", "Слёты"), ("expired", "Истёкшие")]
+    else:
+        nav_items = [
+            ("dashboard", "Дашборд"), ("keys", "Ключи"), ("users", "Пользователи"),
+            ("properties", "Слёты"), ("expired", "Истёкшие"), ("settings", "Настройки"),
+            ("editors", "Редакторы"), ("broadcast", "Рассылка"),
+        ]
     nav = "".join(
         f'<a href="{url_for("admin_"+ep)}" class="{"active" if active==ep else ""}">{label}</a>'
         for ep, label in nav_items
@@ -504,6 +544,10 @@ def render_page(title, active, body):
     flashes = ""
     for kind, msg in session.pop("_flashes", []):
         flashes += f'<div class="flash {kind}">{msg}</div>'
+    if current_role() == "editor":
+        who = f'<span style="color:var(--muted);font-size:13px;margin-right:14px">{session.get("editor_username","")} · редактор</span>'
+    else:
+        who = ""
     return f"""<!DOCTYPE html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title} — Arizona Tracker Admin</title>{BASE_CSS}</head><body>
@@ -511,6 +555,7 @@ def render_page(title, active, body):
   <span class="brand">🏙 Arizona Tracker</span>
   {nav}
   <span class="spacer"></span>
+  {who}
   <a href="{url_for('admin_logout')}">Выйти</a>
 </div>
 <div class="wrap" id="page-content"><div id="flashes">{flashes}</div>{body}</div>
@@ -527,14 +572,32 @@ def admin_login():
     if request.method == "POST":
         u = request.form.get("username", "")
         p = request.form.get("password", "")
-        if (not ADMIN_PASSWORD or
-                not secrets.compare_digest(u, ADMIN_USERNAME) or
-                not secrets.compare_digest(p, ADMIN_PASSWORD)):
-            error = '<div class="flash err">Неверный логин или пароль</div>'
-        else:
+
+        is_super_admin = (
+            ADMIN_PASSWORD and
+            secrets.compare_digest(u, ADMIN_USERNAME) and
+            secrets.compare_digest(p, ADMIN_PASSWORD)
+        )
+
+        if is_super_admin:
+            session.clear()
             session.permanent = True
             session["admin_logged_in"] = True
+            session["role"] = "admin"
             return redirect(url_for("admin_dashboard"))
+
+        editor = find_editor_by_username(u) if u else None
+        if editor and editor.get("active", True) and editor.get("password_hash") and check_password_hash(editor["password_hash"], p):
+            session.clear()
+            session.permanent = True
+            session["admin_logged_in"] = True
+            session["role"] = "editor"
+            session["editor_id"] = editor["id"]
+            session["editor_username"] = editor.get("username", "")
+            session["editor_servers"] = [s for s in editor.get("servers", []) if s in VALID_SERVERS]
+            return redirect(url_for("admin_properties"))
+
+        error = '<div class="flash err">Неверный логин или пароль</div>'
     else:
         error = ""
     body = f"""
@@ -559,10 +622,12 @@ def admin_logout():
 @app.route("/admin")
 @login_required
 def admin_root():
+    if current_role() == "editor":
+        return redirect(url_for("admin_properties"))
     return redirect(url_for("admin_dashboard"))
 
 @app.route("/admin/dashboard")
-@login_required
+@admin_only
 def admin_dashboard():
     now          = int(time.time())
     users_data   = db.reference("users").get() or {}
@@ -587,7 +652,7 @@ def admin_dashboard():
     return render_page("Дашборд", "dashboard", body)
 
 @app.route("/admin/keys")
-@login_required
+@admin_only
 def admin_keys():
     data = db.reference("access_keys").get() or {}
     rows = ""
@@ -624,7 +689,7 @@ def admin_keys():
     return render_page("Ключи", "keys", body)
 
 @app.route("/admin/keys/generate", methods=["POST"])
-@login_required
+@admin_only
 def admin_key_generate():
     try:
         days  = int(request.form.get("days", 0))
@@ -647,7 +712,7 @@ def admin_key_generate():
     return redirect(url_for("admin_keys"))
 
 @app.route("/admin/keys/<key>/revoke", methods=["POST"])
-@login_required
+@admin_only
 def admin_key_revoke(key):
     ref  = db.reference(f"access_keys/{key}")
     data = ref.get()
@@ -659,7 +724,7 @@ def admin_key_revoke(key):
     return redirect(url_for("admin_keys"))
 
 @app.route("/admin/users")
-@login_required
+@admin_only
 def admin_users():
     now         = int(time.time())
     users_data  = db.reference("users").get() or {}
@@ -725,7 +790,7 @@ def admin_users():
     return render_page("Пользователи", "users", body)
 
 @app.route("/admin/users/<uid>/extend", methods=["POST"])
-@login_required
+@admin_only
 def admin_user_extend(uid):
     try:
         days = int(request.form.get("days", 0))
@@ -748,7 +813,7 @@ def admin_user_extend(uid):
     return redirect(url_for("admin_users"))
 
 @app.route("/admin/users/<uid>/ban", methods=["POST"])
-@login_required
+@admin_only
 def admin_user_ban(uid):
     reason  = request.form.get("reason", "через админку")
     now_str = format_msk(time.time(), "%d.%m.%Y %H:%M") + " МСК"
@@ -757,15 +822,16 @@ def admin_user_ban(uid):
     return redirect(url_for("admin_users"))
 
 @app.route("/admin/users/<uid>/unban", methods=["POST"])
-@login_required
+@admin_only
 def admin_user_unban(uid):
     db.reference(f"banned/{uid}").delete()
     flash_msg("ok", f"Пользователь {uid} разбанен")
     return redirect(url_for("admin_users"))
 
 # Properties functions
-def _collect_property_entries(srv_filter):
-    """Собирает все записи properties из Firebase, опционально фильтруя по серверу.
+def _collect_property_entries(srv_filter, allowed=None):
+    """Собирает все записи properties из Firebase, опционально фильтруя по серверу
+    и по множеству разрешённых серверов (для роли редактора).
     Возвращает список кортежей (server, key, value_dict).
     """
     data = db.reference("properties").get() or {}
@@ -775,13 +841,15 @@ def _collect_property_entries(srv_filter):
             continue
         if srv_filter and srv != srv_filter:
             continue
+        if allowed is not None and srv not in allowed:
+            continue
         for k, v in entries.items():
             if not isinstance(v, dict):
                 continue
             all_entries.append((srv, k, v))
     return all_entries
 
-def _render_property_rows(entries, back_endpoint="admin_properties", dropat_cfg=None):
+def _render_property_rows(entries, back_endpoint="admin_properties", dropat_cfg=None, allowed=None):
     now = int(time.time())
     if dropat_cfg is None:
         dropat_cfg = {}
@@ -822,9 +890,12 @@ def _render_property_rows(entries, back_endpoint="admin_properties", dropat_cfg=
         )
 
         if srv not in server_opts_cache:
+            # Редактору нельзя переносить запись на сервер вне его прав —
+            # список серверов для смены ограничен его набором (+ текущий сервер записи)
+            selectable = [s for s in SERVER_ORDER if s in VALID_SERVERS and (allowed is None or s in allowed or s == srv)]
             server_opts_cache[srv] = "".join(
                 f'<option value="{s}" {"selected" if s == srv else ""}>{server_label(s)}</option>'
-                for s in SERVER_ORDER if s in VALID_SERVERS
+                for s in selectable
             )
         server_opts = server_opts_cache[srv]
         rows += f"""
@@ -833,6 +904,7 @@ def _render_property_rows(entries, back_endpoint="admin_properties", dropat_cfg=
             <form method="post" action="{url_for('admin_property_update', server=srv, key=k)}" class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
               <input type="hidden" name="back" value="{back_endpoint}">
               <select name="server">{server_opts}</select>
+
               <select name="propType">
                 <option value="house" {"selected" if v.get("propType")=="house" else ""}>🏠 house</option>
                 <option value="business" {"selected" if v.get("propType")=="business" else ""}>🏢 business</option>
@@ -957,17 +1029,26 @@ def admin_properties():
     now        = int(time.time())
     srv_filter = request.args.get("server", "")
 
+    allowed = allowed_servers_for_current_user()
+    if current_role() == "editor" and srv_filter and srv_filter not in allowed:
+        srv_filter = ""  # игнорируем фильтр по чужому серверу
+
     # Загружаем конфиг порогов ОДНИМ запросом, а не по одному на каждую запись —
     # раньше именно это (N+1 запросов к Firebase) тормозило открытие вкладки
     dropat_cfg = db.reference("config/dropAt").get() or {}
 
-    all_entries = [e for e in _collect_property_entries(srv_filter) if e[2].get("expiryTs", 0) > now]
+    collect_allowed = allowed if current_role() == "editor" else None
+    all_entries = [e for e in _collect_property_entries(srv_filter, allowed=collect_allowed) if e[2].get("expiryTs", 0) > now]
     all_entries.sort(key=lambda item: item[2].get("expiryTs", 0))
-    rows = _render_property_rows(all_entries, back_endpoint="admin_properties", dropat_cfg=dropat_cfg)
+    rows = _render_property_rows(all_entries, back_endpoint="admin_properties", dropat_cfg=dropat_cfg, allowed=collect_allowed)
 
+    visible_servers = [s for s in SERVER_ORDER if s in VALID_SERVERS and s in allowed]
     server_options = "".join(
-        f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
+        f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in visible_servers
     )
+
+    if current_role() == "editor" and not allowed:
+        flash_msg("err", "Вам пока не назначены сервера — обратитесь к администратору")
 
     action_panel = _render_batch_action_panel()
     batch_js = _render_batch_js(url_for('admin_properties_batch_edit'), url_for('admin_properties_batch_delete'))
@@ -1016,14 +1097,20 @@ def admin_expired():
     now        = int(time.time())
     srv_filter = request.args.get("server", "")
 
+    allowed = allowed_servers_for_current_user()
+    if current_role() == "editor" and srv_filter and srv_filter not in allowed:
+        srv_filter = ""
+
     dropat_cfg = db.reference("config/dropAt").get() or {}
 
-    all_entries = [e for e in _collect_property_entries(srv_filter) if e[2].get("expiryTs", 0) <= now]
+    collect_allowed = allowed if current_role() == "editor" else None
+    all_entries = [e for e in _collect_property_entries(srv_filter, allowed=collect_allowed) if e[2].get("expiryTs", 0) <= now]
     all_entries.sort(key=lambda item: item[2].get("expiryTs", 0), reverse=True)
-    rows = _render_property_rows(all_entries, back_endpoint="admin_expired", dropat_cfg=dropat_cfg)
+    rows = _render_property_rows(all_entries, back_endpoint="admin_expired", dropat_cfg=dropat_cfg, allowed=collect_allowed)
 
+    visible_servers = [s for s in SERVER_ORDER if s in VALID_SERVERS and s in allowed]
     server_options = "".join(
-        f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
+        f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in visible_servers
     )
 
     action_panel = _render_batch_action_panel()
@@ -1072,6 +1159,9 @@ def admin_property_add():
     if server not in VALID_SERVERS or prop_type not in ("house", "business"):
         flash_msg("err", "Неверный сервер или тип")
         return redirect(url_for("admin_properties"))
+    if current_role() == "editor" and server not in allowed_servers_for_current_user():
+        flash_msg("err", "У вас нет доступа к этому серверу")
+        return redirect(url_for("admin_properties"))
     if pd <= 0 or pd > 65:
         flash_msg("err", "PayDay должен быть 1–65")
         return redirect(url_for("admin_properties"))
@@ -1118,6 +1208,9 @@ def admin_property_delete(server, key):
     back = request.form.get("back", "admin_properties")
     if back not in ("admin_properties", "admin_expired"):
         back = "admin_properties"
+    if current_role() == "editor" and server not in allowed_servers_for_current_user():
+        flash_msg("err", "У вас нет доступа к этому серверу")
+        return redirect(url_for(back))
     db.reference(f"properties/{server}/{key}").delete()
     flash_msg("ok", "Запись удалена")
     return redirect(url_for(back))
@@ -1129,16 +1222,23 @@ def admin_properties_batch_edit():
     if not selected:
         flash_msg("err", "Ничего не выбрано")
         return redirect(url_for("admin_properties"))
+    allowed = allowed_servers_for_current_user()
     entries = []
+    skipped = 0
     for s in selected:
         try:
             srv, key = s.split("|", 1)
         except Exception:
             continue
+        if current_role() == "editor" and srv not in allowed:
+            skipped += 1
+            continue
         v = db.reference(f"properties/{srv}/{key}").get()
         if not v or not isinstance(v, dict):
             continue
         entries.append((srv, key, v))
+    if skipped:
+        flash_msg("err", f"Пропущено записей без доступа: {skipped}")
     if not entries:
         flash_msg("err", "Выбранные записи не найдены")
         return redirect(url_for("admin_properties"))
@@ -1147,7 +1247,8 @@ def admin_properties_batch_edit():
     for i, (srv, key, v) in enumerate(entries):
         idx = i
         dt_local = _dt.datetime.fromtimestamp(v.get("expiryTs", 0), tz=MSK_TZ).strftime("%Y-%m-%dT%H:%M") if v.get("expiryTs") else ""
-        server_opts = "".join(f'<option value="{s}" {"selected" if s==srv else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS)
+        selectable = [s for s in SERVER_ORDER if s in VALID_SERVERS and (current_role() == "admin" or s in allowed or s == srv)]
+        server_opts = "".join(f'<option value="{s}" {"selected" if s==srv else ""}>{server_label(s)}</option>' for s in selectable)
         rows += f"""
         <tr>
           <td>
@@ -1196,14 +1297,19 @@ def admin_properties_batch_update():
         count = int(request.form.get("count", 0))
     except ValueError:
         count = 0
+    allowed = allowed_servers_for_current_user()
     now = int(time.time())
     updated = 0
     deleted = 0
+    skipped = 0
     for i in range(count):
         sidx = str(i)
         orig_server = request.form.get(f"orig_server_{sidx}")
         orig_key = request.form.get(f"orig_key_{sidx}")
         if not orig_key or not orig_server:
+            continue
+        if current_role() == "editor" and orig_server not in allowed:
+            skipped += 1
             continue
         if request.form.get(f"delete_{sidx}") == "on":
             db.reference(f"properties/{orig_server}/{orig_key}").delete()
@@ -1211,6 +1317,9 @@ def admin_properties_batch_update():
             continue
 
         new_server = request.form.get(f"server_{sidx}", orig_server)
+        if current_role() == "editor" and new_server not in allowed:
+            skipped += 1
+            continue
         prop_type = request.form.get(f"propType_{sidx}", "house")
         try:
             pd = int(request.form.get(f"pd_{sidx}", 0))
@@ -1263,6 +1372,8 @@ def admin_properties_batch_update():
             db.reference(f"properties/{orig_server}/{orig_key}").set(new_record)
         updated += 1
 
+    if skipped:
+        flash_msg("err", f"Пропущено без доступа: {skipped}")
     flash_msg("ok", f"Обновлено: {updated}, удалено: {deleted}")
     return redirect(url_for("admin_properties"))
 
@@ -1273,20 +1384,30 @@ def admin_properties_batch_delete():
     if not selected:
         flash_msg("err", "Ничего не выбрано")
         return redirect(url_for("admin_properties"))
+    allowed = allowed_servers_for_current_user()
     deleted = 0
+    skipped = 0
     for s in selected:
         try:
             srv, key = s.split("|", 1)
         except Exception:
             continue
+        if current_role() == "editor" and srv not in allowed:
+            skipped += 1
+            continue
         db.reference(f"properties/{srv}/{key}").delete()
         deleted += 1
+    if skipped:
+        flash_msg("err", f"Пропущено без доступа: {skipped}")
     flash_msg("ok", f"Удалено: {deleted}")
     return redirect(url_for("admin_properties"))
 
 @app.route("/admin/properties/<server>/<key>/edit", methods=["GET"])
 @login_required
 def admin_property_edit(server, key):
+    if current_role() == "editor" and server not in allowed_servers_for_current_user():
+        flash_msg("err", "У вас нет доступа к этому серверу")
+        return redirect(url_for("admin_properties"))
     v = db.reference(f"properties/{server}/{key}").get()
     if not v or not isinstance(v, dict):
         flash_msg("err", "Запись не найдена")
@@ -1355,6 +1476,12 @@ def admin_property_update(server, key):
         flash_msg("err", "Запись не найдена")
         return redirect(url_for(back))
 
+    if current_role() == "editor":
+        allowed = allowed_servers_for_current_user()
+        if server not in allowed:
+            flash_msg("err", "У вас нет доступа к этому серверу")
+            return redirect(url_for(back))
+
     new_server = request.form.get("server", server)
     prop_type  = request.form.get("propType", "house")
     prop_id    = request.form.get("propId", "").strip()
@@ -1376,6 +1503,9 @@ def admin_property_update(server, key):
 
     if new_server not in VALID_SERVERS or prop_type not in ("house", "business"):
         flash_msg("err", "Неверный сервер или тип")
+        return redirect(url_for("admin_property_edit", server=server, key=key))
+    if current_role() == "editor" and new_server not in allowed_servers_for_current_user():
+        flash_msg("err", "У вас нет доступа к серверу назначения")
         return redirect(url_for("admin_property_edit", server=server, key=key))
     if pd <= 0 or pd > 65:
         flash_msg("err", "PayDay должен быть 1–65")
@@ -1427,7 +1557,7 @@ def admin_property_update(server, key):
 
 # ── Настройки (пороги слёта по серверам) ─────────────────
 @app.route("/admin/settings")
-@login_required
+@admin_only
 def admin_settings():
     dropat_cfg = db.reference("config/dropAt").get() or {}
     rows = ""
@@ -1459,7 +1589,7 @@ def admin_settings():
     return render_page("Настройки", "settings", body)
 
 @app.route("/admin/settings/save", methods=["POST"])
-@login_required
+@admin_only
 def admin_settings_save():
     updated = 0
     for s in SERVER_ORDER:
@@ -1478,8 +1608,168 @@ def admin_settings_save():
     flash_msg("ok", f"Настройки сохранены ({updated} значений)")
     return redirect(url_for("admin_settings"))
 
+# ── Редакторы (ограниченные аккаунты по серверам) ────────
+def _server_checkboxes_html(name="servers", checked=None, id_prefix=""):
+    checked = checked or set()
+    boxes = []
+    for s in SERVER_ORDER:
+        if s not in VALID_SERVERS:
+            continue
+        cid = f"{id_prefix}{name}_{s}".replace(" ", "_")
+        is_checked = "checked" if s in checked else ""
+        boxes.append(
+            f'<label for="{cid}" style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:normal;cursor:pointer">'
+            f'<input type="checkbox" id="{cid}" name="{name}" value="{s}" {is_checked}> {s}</label>'
+        )
+    return f'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px">{"".join(boxes)}</div>'
+
+@app.route("/admin/editors")
+@admin_only
+def admin_editors():
+    data = db.reference("editors").get() or {}
+    editors = []
+    for eid, e in data.items():
+        if isinstance(e, dict):
+            e = dict(e)
+            e["id"] = eid
+            editors.append(e)
+    editors.sort(key=lambda e: e.get("created_at", 0), reverse=True)
+
+    rows = ""
+    for e in editors:
+        eid = e["id"]
+        servers = [s for s in e.get("servers", []) if s in VALID_SERVERS]
+        servers_label = ", ".join(servers) if servers else '<span style="color:var(--muted)">нет серверов</span>'
+        active = e.get("active", True)
+        status_pill = '<span class="pill ok">активен</span>' if active else '<span class="pill muted">отключён</span>'
+        toggle_label = "Отключить" if active else "Включить"
+        created = format_msk(e.get("created_at", 0), "%d.%m.%Y %H:%M")
+
+        rows += f"""
+        <tr id="view-ed{eid}">
+          <td class="mono">{e.get("username","—")}</td>
+          <td>{servers_label}</td>
+          <td>{status_pill}</td>
+          <td>{created}</td>
+          <td class="row">
+            <button class="ghost" type="button" onclick="toggleEdit('ed{eid}')">Сервера</button>
+            <form class="inline" method="post" action="{url_for('admin_editor_toggle', eid=eid)}">
+              <button class="ghost" type="submit">{toggle_label}</button>
+            </form>
+            <form class="inline" method="post" action="{url_for('admin_editor_delete', eid=eid)}" onsubmit="return confirm('Удалить редактора {e.get('username','')}?')">
+              <button class="danger" type="submit">Удалить</button>
+            </form>
+          </td>
+        </tr>
+        <tr id="edit-ed{eid}" style="display:none">
+          <td colspan="5">
+            <form method="post" action="{url_for('admin_editor_update_servers', eid=eid)}" style="margin-bottom:12px">
+              <div style="color:var(--muted);font-size:13px;margin-bottom:8px">Доступные сервера для «{e.get("username","")}»:</div>
+              {_server_checkboxes_html(checked=set(servers), id_prefix=f"ed{eid}_")}
+              <div style="margin-top:10px">
+                <button type="submit">Сохранить сервера</button>
+                <button type="button" class="ghost" onclick="toggleEdit('ed{eid}')">Отмена</button>
+              </div>
+            </form>
+            <form method="post" action="{url_for('admin_editor_password', eid=eid)}" class="row" style="border-top:1px solid var(--border);padding-top:12px">
+              <input type="password" name="password" placeholder="Новый пароль" required style="width:200px">
+              <button type="submit">Сменить пароль</button>
+            </form>
+          </td>
+        </tr>
+        """
+
+    body = f"""
+    <h1>Редакторы</h1>
+    <div class="card">
+      <h2 style="margin-top:0">Создать редактора</h2>
+      <form method="post" action="{url_for('admin_editor_add')}">
+        <div class="row" style="margin-bottom:14px">
+          <input type="text" name="username" placeholder="Логин" required style="width:200px">
+          <input type="text" name="password" placeholder="Пароль (мин. 4 символа)" required style="width:220px">
+        </div>
+        <div style="color:var(--muted);font-size:13px;margin-bottom:8px">Доступные сервера:</div>
+        {_server_checkboxes_html()}
+        <div style="margin-top:14px"><button type="submit">Создать</button></div>
+      </form>
+    </div>
+    <table>
+      <tr><th>Логин</th><th>Сервера</th><th>Статус</th><th>Создан</th><th></th></tr>
+      {rows or "<tr><td colspan='5'>Редакторов пока нет</td></tr>"}
+    </table>
+    {TOGGLE_EDIT_SCRIPT}"""
+    return render_page("Редакторы", "editors", body)
+
+@app.route("/admin/editors/add", methods=["POST"])
+@admin_only
+def admin_editor_add():
+    username = request.form.get("username", "").strip()
+    password = request.form.get("password", "").strip()
+    servers  = [s for s in request.form.getlist("servers") if s in VALID_SERVERS]
+
+    if not username or not password:
+        flash_msg("err", "Укажите логин и пароль")
+        return redirect(url_for("admin_editors"))
+    if len(password) < 4:
+        flash_msg("err", "Пароль слишком короткий (минимум 4 символа)")
+        return redirect(url_for("admin_editors"))
+    if secrets.compare_digest(username, ADMIN_USERNAME):
+        flash_msg("err", "Этот логин зарезервирован")
+        return redirect(url_for("admin_editors"))
+    if find_editor_by_username(username):
+        flash_msg("err", "Такой логин уже занят")
+        return redirect(url_for("admin_editors"))
+
+    new_ref = db.reference("editors").push()
+    new_ref.set({
+        "username": username,
+        "password_hash": generate_password_hash(password),
+        "servers": servers,
+        "active": True,
+        "created_at": int(time.time()),
+    })
+    flash_msg("ok", f"Редактор «{username}» создан")
+    return redirect(url_for("admin_editors"))
+
+@app.route("/admin/editors/<eid>/servers", methods=["POST"])
+@admin_only
+def admin_editor_update_servers(eid):
+    servers = [s for s in request.form.getlist("servers") if s in VALID_SERVERS]
+    db.reference(f"editors/{eid}/servers").set(servers)
+    flash_msg("ok", "Список серверов обновлён")
+    return redirect(url_for("admin_editors"))
+
+@app.route("/admin/editors/<eid>/password", methods=["POST"])
+@admin_only
+def admin_editor_password(eid):
+    password = request.form.get("password", "").strip()
+    if len(password) < 4:
+        flash_msg("err", "Пароль слишком короткий (минимум 4 символа)")
+        return redirect(url_for("admin_editors"))
+    db.reference(f"editors/{eid}/password_hash").set(generate_password_hash(password))
+    flash_msg("ok", "Пароль обновлён")
+    return redirect(url_for("admin_editors"))
+
+@app.route("/admin/editors/<eid>/toggle", methods=["POST"])
+@admin_only
+def admin_editor_toggle(eid):
+    e = db.reference(f"editors/{eid}").get()
+    if not e or not isinstance(e, dict):
+        flash_msg("err", "Редактор не найден")
+        return redirect(url_for("admin_editors"))
+    db.reference(f"editors/{eid}/active").set(not e.get("active", True))
+    flash_msg("ok", "Статус обновлён")
+    return redirect(url_for("admin_editors"))
+
+@app.route("/admin/editors/<eid>/delete", methods=["POST"])
+@admin_only
+def admin_editor_delete(eid):
+    db.reference(f"editors/{eid}").delete()
+    flash_msg("ok", "Редактор удалён")
+    return redirect(url_for("admin_editors"))
+
 @app.route("/admin/broadcast")
-@login_required
+@admin_only
 def admin_broadcast():
     if not BOT_TOKEN:
         flash_msg("err", "BOT_TOKEN не задан в переменных окружения — рассылка недоступна")
@@ -1497,7 +1787,7 @@ def admin_broadcast():
     return render_page("Рассылка", "broadcast", body)
 
 @app.route("/admin/broadcast/send", methods=["POST"])
-@login_required
+@admin_only
 def admin_broadcast_send():
     text = request.form.get("text", "").strip()
     if not text:
