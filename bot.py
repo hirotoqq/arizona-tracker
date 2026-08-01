@@ -768,7 +768,7 @@ async def show_profile(update, ctx):
         f"🔑 Доступ: {access_str}\n\n"
         f"🔔 Уведомления слётов: {'✅ Вкл' if is_sub else '❌ Выкл'}\n"
         f"⏱ Предупреждать за: {notify_str}\n\n"
-        f"🎰 Уведомления лотерея: {'✅ Вкл' if is_lot else '❌ Выкл'}\n"
+        f"🎰 Уведомления лотереи: {'✅ Вкл' if is_lot else '❌ Выкл'}\n"
         f"⏱ За: {lot_str}\n\n"
         f"🏆 Уведомления о смене сезона: {'✅ Вкл' if is_season else '❌ Выкл'}\n\n"
         f"⭐️ Избранные серверы:\n_{fav_str}_"
@@ -953,22 +953,34 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         week_idx = get_current_week_index()
         servers_with_season = [SERVER_ORDER[i] for i, s in enumerate(SEASON_TABLES[week_idx]) if s == season_num]
         props = [p for p in get_all_props() if p["server"] in servers_with_season]
-        text, total = build_list_text(props, f"{season_emoji} {season_name}")
+        # корректная распаковка из build_list_text (header, block, total)
+        header, block, total = build_list_text(props, f"{season_emoji} {season_name}")
         btns = _page_buttons(0, total, f"fseas{season_num}")
         btns.append([InlineKeyboardButton("◀️ К фильтру", callback_data="back_filter")])
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+        try:
+            await query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+        except Exception:
+            await query.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
 
     elif data.startswith("fseas"):
-        season_num  = int(data[5:data.index("_page_")])
-        page        = int(data.split("_")[-1])
+        # формат fseas{num}_page_{n}
+        try:
+            season_num  = int(data[5:data.index("_page_")])
+            page        = int(data.split("_")[-1])
+        except Exception:
+            await query.answer("Ошибка обработки", show_alert=True)
+            return
         season_name, season_emoji = SEASON_NAMES[season_num]
         week_idx = get_current_week_index()
         servers_with_season = [SERVER_ORDER[i] for i, s in enumerate(SEASON_TABLES[week_idx]) if s == season_num]
         props = [p for p in get_all_props() if p["server"] in servers_with_season]
-        text, total = build_list_text(props, f"{season_emoji} {season_name}", page=page)
+        header, block, total = build_list_text(props, f"{season_emoji} {season_name}", page=page)
         btns = _page_buttons(page, total, f"fseas{season_num}")
         btns.append([InlineKeyboardButton("◀️ К фильтру", callback_data="back_filter")])
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+        try:
+            await query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+        except Exception:
+            await query.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
 
     elif data == "back_filter":
         await show_filter_menu(update, ctx)
@@ -985,11 +997,15 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if counts["business"]: parts.append(f"🏢×{counts['business']}")
         stats_str          = " ".join(parts)
         season_name, s_emoji = get_season_by_name(server)
-        season_str         = f"{s_emoji} {season_name}" if season_name else ""
-        text, _            = build_list_text(props, f"📋 {server}", page=0, hide_season=True)
-        text               = warn + text + f"\n\n🏆 Сезон: {season_str}\n🕐 _Последний скан: {scan_str}_"
+        # правильная распаковка: header, block, total
+        header, block, total = build_list_text(props, f"📋 {server}", page=0, hide_season=True)
+        text = warn + header + "\n" + block + f"\n\n🏆 Сезон: {s_emoji} {season_name}\n🕐 _Последний скан: {scan_str}_"
         buttons            = [[InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]]
-        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+        try:
+            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+        except Exception:
+            # fallback: отправим новое сообщение, если редактировать нельзя
+            await query.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
     elif data == "action_notify_toggle":
         if chat_id in subscribers: subscribers.discard(chat_id)
@@ -1176,7 +1192,7 @@ async def cleanup_history():
             if isinstance(v, dict) and v.get("expiryTs", 0) < since:
                 ref.child(k).delete()
 
-# ── Запуск ────────────────────────────────────────────────
+# ── Запуск ───────────────────────────────────────────────
 def main():
     global all_users, banned_users, subscriptions
     all_users     = load_users()

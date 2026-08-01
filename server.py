@@ -1,3 +1,4 @@
+# server.py
 from flask import Flask, request, jsonify, session, redirect, url_for, render_template_string
 import firebase_admin
 from firebase_admin import credentials, db
@@ -5,6 +6,7 @@ import os, time, json, threading, secrets, string
 from functools import wraps
 from datetime import timedelta
 import requests
+import datetime as _dt
 
 app = Flask(__name__)
 
@@ -833,6 +835,7 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
 
         d_val = v.get("d", DEFAULT_D)
 
+        # Компактная строка (меньше колонок): Сервер | Тип | PD | D | ID/pos | Порог | Слёт | Статус | Действия
         rows += (
             f"<tr id='view-{row_id}'><td>{server_label(srv)}</td><td>{v.get('propType','?')}</td><td>{v.get('pd','—')}</td>"
             f"<td>{d_val}</td><td>{v.get('propId') or v.get('pos') or '—'}</td><td>{drop_display}</td><td>{when}</td><td>{status}</td><td class='row'>{edit_btn}{del_btn}</td></tr>"
@@ -1165,10 +1168,16 @@ def admin_property_update(server, key):
             return redirect(url_for("admin_property_edit", server=server, key=key))
         expiry_ts = calc_expiry_from_pdl(pd, d_val, drop_at)
     else:
+        # Парсим datetime-local как МСК (UTC+3), чтобы не было сдвига -3h
         try:
-            import datetime as _dt
-            expiry_ts = int(_dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M").timestamp())
-        except ValueError:
+            msktz = _dt.timezone(_dt.timedelta(hours=3))
+            if expiry_str:
+                dt = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M")
+                expiry_ts = int(dt.replace(tzinfo=msktz).timestamp())
+            else:
+                flash_msg("err", "Укажите Порог или время слёта")
+                return redirect(url_for("admin_property_edit", server=server, key=key))
+        except Exception:
             flash_msg("err", "Неверный формат времени")
             return redirect(url_for("admin_property_edit", server=server, key=key))
 
