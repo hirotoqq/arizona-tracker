@@ -227,7 +227,7 @@ def fmt_time_left(hours_left, mins_left):
 
 def build_list_text(props, title="📋 Актуальные слёты", page=0, hide_season=False, no_pages=False):
     if not props:
-        return "✅ Слётов нет или данных пока нет.", 0
+        return "✅ Слётов нет или данных пока нет.", "", 0
 
     house_total = sum(p.get("count", 1) for p in props if p["propType"] == "house")
     biz_total   = sum(p.get("count", 1) for p in props if p["propType"] == "business")
@@ -238,7 +238,6 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
         by_time[p["expiryTs"]][p["server"]][p["propType"]].append(p)
 
     time_slots = sorted(by_time.keys())
-
     blocks = []
     for ts in time_slots:
         for srv in sorted(by_time[ts].keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999):
@@ -256,23 +255,18 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
     for ts, srv in chunk_blocks:
         chunk_times[ts].append(srv)
 
-    lines = [f"*{title}*"]
+    # Заголовок — Markdown
     stats = []
     if house_total: stats.append(f"🏠×{house_total}")
     if biz_total:   stats.append(f"🏢×{biz_total}")
-    if stats: lines.append(" ".join(stats))
-    if total_pages > 1 and not no_pages:
-        lines.append(f"_Страница {page + 1} из {total_pages}_")
-    lines.append("")
-
-    # Переключаемся на HTML
-    header = f"<b>{title}</b>\n"
-    stats_str = " ".join(stats) if stats else ""
+    stats_str  = " ".join(stats) if stats else ""
+    header     = f"*{title}*"
     if stats_str:
-        header += f"{stats_str}\n"
+        header += f"\n{stats_str}"
     if total_pages > 1 and not no_pages:
-        header += f"<i>Страница {page + 1} из {total_pages}</i>\n"
+        header += f"\n_Страница {page + 1} из {total_pages}_"
 
+    # Дерево — код блок
     tree_lines = []
     for ts in sorted(chunk_times.keys()):
         servers_in_time = chunk_times[ts]
@@ -298,7 +292,7 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
 
                 for ii, item in enumerate(items):
                     is_last_item = ii == len(items) - 1
-                    item_ind     = "         " if not is_last_srv else "         "
+                    item_ind     = "         "
                     item_prefix  = f"{item_ind}└─" if is_last_item else f"{item_ind}├─"
                     prop_id = item.get("propId")
                     pos     = item.get("pos")
@@ -313,16 +307,8 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
 
         tree_lines.append("")
 
-    block = "<blockquote expandable>" + "\n".join(tree_lines) + "</blockquote>"
-    # Убираем HTML теги из заголовка — используем Markdown
-    header = f"<b>{title}</b>\n"
-    if stats_str:
-        header += f"{stats_str}\n"
-    if total_pages > 1 and not no_pages:
-        header += f"<i>Страница {page + 1} из {total_pages}</i>\n"
-    return header + "\n" + block, total_pages
-
-    return "\n".join(lines), total_pages
+    block = "```\n" + "\n".join(tree_lines) + "\n```"
+    return header, block, total_pages
 
 # ── Клавиатура ────────────────────────────────────────────
 def permanent_keyboard():
@@ -487,33 +473,33 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── Показ списков ─────────────────────────────────────────
 async def show_list(update, ctx, page=0):
     props = get_all_props()
-    text, total = build_list_text(props, page=page)
+    header, block, total = build_list_text(props, page=page)
     btns = _page_buttons(page, total, "list")
     kb   = InlineKeyboardMarkup(btns) if btns else None
     if update.message:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+        await update.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
     else:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        await update.callback_query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
 
 async def show_soon(update, ctx, page=0):
     props = [p for p in get_all_props() if p["hoursLeft"] <= 3]
-    text, total = build_list_text(props, "⚠️ Слёты в ближайшие 3 часа", no_pages=True)
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄", callback_data="soon_refresh")]]) 
+    header, block, total = build_list_text(props, "⚠️ Слёты в ближайшие 3 часа", no_pages=True)
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄", callback_data="soon_refresh")]])
     if update.message:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+        await update.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
     else:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        await update.callback_query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
 
 async def show_mass_drop(update, ctx, page=0):
     props    = get_all_props()
     filtered = [p for p in props if p.get("count", 1) >= MASS_DROP_MIN]
-    text, total = build_list_text(filtered, f"💥 Массовые слёты ({MASS_DROP_MIN}+)", page=page)
+    header, block, total = build_list_text(filtered, f"💥 Массовые слёты ({MASS_DROP_MIN}+)", page=page)
     btns = _page_buttons(page, total, "mass")
     kb   = InlineKeyboardMarkup(btns) if btns else None
     if update.message:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
+        await update.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
     else:
-        await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
+        await update.callback_query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
 
 async def show_filter_menu(update, ctx):
     buttons = []
@@ -560,7 +546,8 @@ async def show_favorites(update, ctx, page=0):
         return
 
     props = [p for p in get_all_props() if p["server"] in favs]
-    text, total = build_list_text(props, "⭐️ Избранные серверы", page=page)
+    header, block, total = build_list_text(props, "⭐️ Избранные серверы", page=page)
+    text = header + "\n" + block
     btns = _page_buttons(page, total, "fav")
     btns.append([InlineKeyboardButton("✏️ Изменить", callback_data="fav_edit")])
     kb = InlineKeyboardMarkup(btns)
