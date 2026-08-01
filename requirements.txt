@@ -2,3 +2,4 @@ flask
 firebase-admin
 python-telegram-bot==22.8
 gunicorn
+requests
