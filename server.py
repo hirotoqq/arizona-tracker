@@ -64,60 +64,79 @@ def format_msk(ts, fmt="%d.%m.%Y %H:%M"):
     except Exception:
         return ""
 
-DEFAULT_DROP_AT_HOUSE = 1
-DEFAULT_DROP_AT_BIZ   = 1
-DEFAULT_D = 1
+DEFAULT_DROP_AT_INSURED   = 2
+DEFAULT_DROP_AT_UNINSURED = 3
+D_INSURED   = 1   # застрахованный дом теряет 1 PD в час
+D_UNINSURED = 2   # незастрахованный дом теряет 2 PD в час
+DEFAULT_D = D_INSURED
 
-SERVER_DROP_AT_HOUSE = {
+# Порог слёта (L) по каждому серверу — отдельно для застрахованных и незастрахованных домов
+SERVER_DROP_AT_INSURED = {
     "Phoenix": 2, "Tucson": 2, "Scottdale": 2, "Chandler": 2,
     "Brainburg": 2, "Saint-Rose": 2, "Mesa": 2, "Red-Rock": 2,
-    "Yuma": 2, "Surprise": 2, "Prescott": 1, "Glendale": 2,
+    "Yuma": 2, "Surprise": 2, "Prescott": 2, "Glendale": 2,
     "Kingman": 2, "Winslow": 2, "Payson": 1, "Gilbert": 2,
     "Show Low": 1, "Casa-Grande": 2, "Page": 2, "Sun-City": 1,
     "Queen-Creek": 2, "Sedona": 2, "Holiday": 2, "Wednesday": 2,
-    "Yava": 2, "Faraway": 1, "Bumble Bee": 1, "Christmas": 2,
+    "Yava": 2, "Faraway": 1, "Bumble Bee": 2, "Christmas": 2,
     "Love": 1, "Mirage": 1, "Drake": 2, "Space": 1,
 }
 
-SERVER_DROP_AT_BIZ = {
-    "Phoenix": 1, "Tucson": 1, "Scottdale": 1, "Chandler": 1,
-    "Brainburg": 2, "Saint-Rose": 1, "Mesa": 1, "Red-Rock": 1,
-    "Yuma": 2, "Surprise": 2, "Prescott": 2, "Glendale": 2,
-    "Kingman": 1, "Winslow": 1, "Payson": 1, "Gilbert": 2,
-    "Show Low": 1, "Casa-Grande": 1, "Page": 1, "Sun-City": 1,
-    "Queen-Creek": 1, "Sedona": 2, "Holiday": 2, "Wednesday": 2,
-    "Yava": 2, "Faraway": 2, "Bumble Bee": 1, "Christmas": 2,
-    "Love": 1, "Mirage": 1, "Drake": 2, "Space": 1,
+SERVER_DROP_AT_UNINSURED = {
+    "Phoenix": 3, "Tucson": 3, "Scottdale": 3, "Chandler": 2,
+    "Brainburg": 3, "Saint-Rose": 3, "Mesa": 2, "Red-Rock": 3,
+    "Yuma": 3, "Surprise": 3, "Prescott": 3, "Glendale": 3,
+    "Kingman": 3, "Winslow": 3, "Payson": 1, "Gilbert": 3,
+    "Show Low": 2, "Casa-Grande": 2, "Page": 3, "Sun-City": 1,
+    "Queen-Creek": 3, "Sedona": 3, "Holiday": 2, "Wednesday": 2,
+    "Yava": 3, "Faraway": 2, "Bumble Bee": 3, "Christmas": 3,
+    "Love": 2, "Mirage": 1, "Drake": 2, "Space": 2,
 }
 
-def get_drop_at(server, prop_type):
+def _insurance_key(insured):
+    return "insured" if insured else "uninsured"
+
+def get_drop_at(server, insured):
+    key = _insurance_key(insured)
     try:
-        cfg = db.reference(f"config/dropAt/{server}/{prop_type}").get()
+        cfg = db.reference(f"config/dropAt/{server}/{key}").get()
     except Exception:
         cfg = None
     if isinstance(cfg, (int, float)):
         return int(cfg)
-    if prop_type == "business":
-        return SERVER_DROP_AT_BIZ.get(server, DEFAULT_DROP_AT_BIZ)
-    return SERVER_DROP_AT_HOUSE.get(server, DEFAULT_DROP_AT_HOUSE)
+    if insured:
+        return SERVER_DROP_AT_INSURED.get(server, DEFAULT_DROP_AT_INSURED)
+    return SERVER_DROP_AT_UNINSURED.get(server, DEFAULT_DROP_AT_UNINSURED)
 
-def get_drop_at_cached(cfg_map, server, prop_type):
+def get_drop_at_cached(cfg_map, server, insured):
     """Как get_drop_at, но без похода в Firebase — использует уже загруженный
     целиком словарь config/dropAt. Нужно, чтобы не делать по одному запросу
     к базе на каждую строку таблицы (именно это тормозило вкладку 'Слёты')."""
+    key = _insurance_key(insured)
     val = None
     if isinstance(cfg_map, dict):
         srv_cfg = cfg_map.get(server)
         if isinstance(srv_cfg, dict):
-            val = srv_cfg.get(prop_type)
+            val = srv_cfg.get(key)
     if isinstance(val, (int, float)):
         return int(val)
-    if prop_type == "business":
-        return SERVER_DROP_AT_BIZ.get(server, DEFAULT_DROP_AT_BIZ)
-    return SERVER_DROP_AT_HOUSE.get(server, DEFAULT_DROP_AT_HOUSE)
+    if insured:
+        return SERVER_DROP_AT_INSURED.get(server, DEFAULT_DROP_AT_INSURED)
+    return SERVER_DROP_AT_UNINSURED.get(server, DEFAULT_DROP_AT_UNINSURED)
 
 def set_drop_at(server, prop_type, value):
     db.reference(f"config/dropAt/{server}/{prop_type}").set(int(value))
+
+def infer_insured(v):
+    """Определяет застрахован ли дом по записи: явное поле 'insured', иначе
+    по старому полю 'd' (для записей, созданных до этого обновления)."""
+    ins = v.get("insured")
+    if isinstance(ins, bool):
+        return ins
+    d = v.get("d")
+    if isinstance(d, (int, float)) and d >= 2:
+        return False
+    return True
 
 def calc_expiry_ts(pd, drop_at, now=None):
     if now is None:
@@ -234,6 +253,9 @@ def update():
         pos     = e.get("pos")
         drop_at = e.get("dropAt")
         d_val   = e.get("d", DEFAULT_D)
+        d_val   = int(d_val) if isinstance(d_val, (int, float, str)) and str(d_val).isdigit() else DEFAULT_D
+        insured = e.get("insured")
+        insured = bool(insured) if isinstance(insured, bool) else (d_val <= 1)
 
         if prop_id:
             key = f"{e['propType']}_{prop_id}"
@@ -245,8 +267,9 @@ def update():
                 "scanTs":   now,
                 "propId":   prop_id,
                 "pos":      pos,
+                "insured":  insured,
                 "dropAt":   drop_at,
-                "d":        int(d_val) if isinstance(d_val, (int, float, str)) and str(d_val).isdigit() else DEFAULT_D,
+                "d":        d_val,
                 "count":    1,
             }
         else:
@@ -260,8 +283,9 @@ def update():
                     "scanTs":   now,
                     "propId":   None,
                     "pos":      pos,
+                    "insured":  insured,
                     "dropAt":   drop_at,
-                    "d":        int(d_val) if isinstance(d_val, (int, float, str)) and str(d_val).isdigit() else DEFAULT_D,
+                    "d":        d_val,
                     "count":    1,
                 }
         written += 1
@@ -873,11 +897,10 @@ def _render_property_rows(entries, back_endpoint="admin_properties", dropat_cfg=
         )
         edit_btn = f'<button class="ghost" type="button" onclick="toggleEdit(\'{row_id}\')">Изменить</button>'
 
+        insured = infer_insured(v)
+        insured_pill = '<span class="pill ok">🛡 Страхован</span>' if insured else '<span class="pill bad">🚫 Не страхован</span>'
         drop_val = v.get("dropAt")
-        drop_default = drop_val if drop_val is not None else get_drop_at_cached(dropat_cfg, srv, v.get("propType", "house"))
-        drop_display = str(drop_default) + ('' if drop_val is not None else ' <span style="color:var(--muted)">(по умолч.)</span>')
-
-        d_val = v.get("d", DEFAULT_D)
+        drop_default = drop_val if drop_val is not None else get_drop_at_cached(dropat_cfg, srv, insured)
 
         # Checkbox hidden by default; shown only after pressing "Изменить выбранные"
         checkbox = f'<input type="checkbox" class="sel-row" name="selected" value="{srv}|{k}" style="display:none">'
@@ -885,7 +908,7 @@ def _render_property_rows(entries, back_endpoint="admin_properties", dropat_cfg=
         rows += (
             f"<tr id='view-{row_id}'><td style='width:36px'>{checkbox}</td>"
             f"<td>{server_label(srv)}</td><td>{v.get('propType','?')}</td><td>{v.get('pd','—')}</td>"
-            f"<td>{d_val}</td><td>{v.get('propId') or v.get('pos') or '—'}</td><td>{drop_display}</td>"
+            f"<td>{insured_pill}</td><td>{v.get('propId') or v.get('pos') or '—'}</td><td>{drop_default}</td>"
             f"<td>{when}</td><td>{status}</td><td class='row'>{edit_btn}{del_btn}</td></tr>"
         )
 
@@ -904,21 +927,21 @@ def _render_property_rows(entries, back_endpoint="admin_properties", dropat_cfg=
             <form method="post" action="{url_for('admin_property_update', server=srv, key=k)}" class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
               <input type="hidden" name="back" value="{back_endpoint}">
               <select name="server">{server_opts}</select>
-
               <select name="propType">
                 <option value="house" {"selected" if v.get("propType")=="house" else ""}>🏠 house</option>
                 <option value="business" {"selected" if v.get("propType")=="business" else ""}>🏢 business</option>
               </select>
               <input type="number" name="pd" value="{v.get('pd', 0)}" min="1" max="65" required style="width:90px" title="PayDay">
-              <label style="color:var(--muted);font-size:13px">D
-                <input type="number" name="d" value="{v.get('d', DEFAULT_D)}" min="1" style="width:80px" title="Сколько PD отнимается каждый час (D)">
-              </label>
+              <select name="insured" title="Застрахованные дома теряют 1 PD/час, незастрахованные — 2 PD/час">
+                <option value="1" {"selected" if insured else ""}>🛡 Страхован</option>
+                <option value="0" {"selected" if not insured else ""}>🚫 Не страхован</option>
+              </select>
               <input type="text" name="propId" placeholder="ID" value="{v.get('propId') or ''}" style="width:120px">
-              <label style="color:var(--muted);font-size:13px">Порог
-                <input type="number" name="dropAt" value="{drop_default if v.get('dropAt') is not None else ''}" min="0" max="10" style="width:70px" title="Порог L (Payday), при достижении — дом слетит)">
-              </label>
-              <input type="datetime-local" name="expiry" value="{dt_local}" title="Используется, если поле 'Порог' пустое">
               <input type="text" name="pos" placeholder="Позиция" value="{v.get('pos') or ''}" style="width:120px">
+              <label style="color:var(--muted);font-size:13px;display:flex;align-items:center;gap:4px">
+                <input type="checkbox" name="manual_time"> вручную
+              </label>
+              <input type="datetime-local" name="expiry" value="{dt_local}" title="Используется только если отмечено 'вручную'">
               <button type="submit">Сохранить</button>
               <button type="button" class="ghost" onclick="toggleEdit('{row_id}')">Отмена</button>
             </form>
@@ -1064,14 +1087,14 @@ def admin_properties():
           <option value="business">🏢 business</option>
         </select>
         <input type="number" name="pd" placeholder="PayDay" min="1" max="65" required style="width:100px">
-        <input type="number" name="d" placeholder="Сколько отнимается (D)" min="1" value="{DEFAULT_D}" style="width:140px">
-        <label style="color:var(--muted);font-size:13px">Порог
-          <input type="number" name="dropAt" placeholder="напр. 1" min="0" max="10" style="width:70px" title="Если указан — время слёта рассчитается по PD/D/L">
-        </label>
-        <input type="number" name="hours" placeholder="Часов до слёта (если без Порога)" min="0" step="0.1" style="width:220px">
+        <select name="insured" title="Застрахованные дома теряют 1 PD/час, незастрахованные — 2 PD/час">
+          <option value="1" selected>🛡 Страхован</option>
+          <option value="0">🚫 Не страхован</option>
+        </select>
+        <input type="number" name="hours" placeholder="Часов до слёта (вручную)" min="0" step="0.1" style="width:200px">
         <input type="text" name="propId" placeholder="ID (необязательно)" style="width:150px">
         <button type="submit">Добавить</button>
-        <div style="width:100%;color:var(--muted);font-size:12px">Заполните либо «Порог» (L) и «Сколько отнимается» (D) — время посчитается автоматически по формуле P/D/L, либо укажите «Часов до слёта» вручную.</div>
+        <div style="width:100%;color:var(--muted);font-size:12px">Укажите «Застрахован ли дом» — время слёта посчитается автоматически по PD и порогу сервера (задаётся в «Настройках»). Поле «Часов до слёта» заполняйте, только если хотите задать время вручную, в обход авторасчёта.</div>
       </form>
     </div>
     <div class="card row">
@@ -1083,7 +1106,7 @@ def admin_properties():
     </div>
     {action_panel}
     <table>
-      <tr><th style="width:36px"></th><th>Сервер</th><th>Тип</th><th>PD</th><th>Сколько отнимается</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
+      <tr><th style="width:36px"></th><th>Сервер</th><th>Тип</th><th>PD</th><th>Страховка</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
       {rows or "<tr><td colspan='10'>Записей нет</td></tr>"}
     </table>
     {batch_js}
@@ -1127,7 +1150,7 @@ def admin_expired():
     </div>
     {action_panel}
     <table>
-      <tr><th style="width:36px"></th><th>Сервер</th><th>Тип</th><th>PD</th><th>Сколько отнимается</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
+      <tr><th style="width:36px"></th><th>Сервер</th><th>Тип</th><th>PD</th><th>Страховка</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
       {rows or "<tr><td colspan='10'>Истёкших записей нет</td></tr>"}
     </table>
     {batch_js}
@@ -1140,20 +1163,13 @@ def admin_property_add():
     server    = request.form.get("server", "")
     prop_type = request.form.get("propType", "")
     prop_id   = request.form.get("propId", "").strip()
-    drop_raw  = request.form.get("dropAt", "").strip()
     hours_raw = request.form.get("hours", "").strip()
+    insured   = request.form.get("insured", "1") == "1"
 
     try:
         pd = int(request.form.get("pd", 0))
     except ValueError:
         flash_msg("err", "Неверное значение PayDay")
-        return redirect(url_for("admin_properties"))
-
-    d_raw = request.form.get("d", "").strip()
-    try:
-        d_val = int(d_raw) if d_raw != "" else DEFAULT_D
-    except ValueError:
-        flash_msg("err", "Неверное значение 'Сколько отнимается'")
         return redirect(url_for("admin_properties"))
 
     if server not in VALID_SERVERS or prop_type not in ("house", "business"):
@@ -1167,19 +1183,9 @@ def admin_property_add():
         return redirect(url_for("admin_properties"))
 
     now = int(time.time())
-    drop_at = None
+    d_val = D_INSURED if insured else D_UNINSURED
 
-    if drop_raw:
-        try:
-            drop_at = int(drop_raw)
-        except ValueError:
-            flash_msg("err", "Неверное значение Порог")
-            return redirect(url_for("admin_properties"))
-        if d_val <= 0:
-            flash_msg("err", "Значение 'Сколько отнимается' должно быть >=1")
-            return redirect(url_for("admin_properties"))
-        expiry_h = calc_expiry_from_pdl(pd, d_val, drop_at, now)
-    elif hours_raw:
+    if hours_raw:
         try:
             hours = float(hours_raw)
         except ValueError:
@@ -1189,15 +1195,17 @@ def admin_property_add():
             flash_msg("err", "Часы должны быть ≥ 0")
             return redirect(url_for("admin_properties"))
         expiry_h = ((now + int(hours * 3600)) // 3600) * 3600
+        drop_at = None
     else:
-        flash_msg("err", "Укажите «Порог» и/или «Сколько отнимается» или «Часов до слёта»")
-        return redirect(url_for("admin_properties"))
+        drop_at = get_drop_at(server, insured)
+        expiry_h = calc_expiry_from_pdl(pd, d_val, drop_at, now)
 
     key = f"{prop_type}_{prop_id}" if prop_id else f"{prop_type}_{expiry_h}_admin_{secrets.token_hex(3)}"
 
     db.reference(f"properties/{server}/{key}").set({
         "server": server, "propType": prop_type, "pd": pd, "expiryTs": expiry_h,
-        "scanTs": now, "propId": prop_id or None, "pos": None, "dropAt": drop_at, "d": d_val, "count": 1,
+        "scanTs": now, "propId": prop_id or None, "pos": None,
+        "insured": insured, "dropAt": drop_at, "d": d_val, "count": 1,
     })
     flash_msg("ok", "Запись добавлена")
     return redirect(url_for("admin_properties"))
@@ -1263,10 +1271,15 @@ def admin_properties_batch_edit():
             </select>
           </td>
           <td><input type="number" name="pd_{idx}" value="{v.get('pd',0)}" min="1" max="65" style="width:70px"></td>
-          <td><input type="number" name="d_{idx}" value="{v.get('d', DEFAULT_D)}" min="1" style="width:60px"></td>
+          <td>
+            <select name="insured_{idx}" style="width:110px">
+              <option value="1" {"selected" if infer_insured(v) else ""}>🛡 Страхован</option>
+              <option value="0" {"selected" if not infer_insured(v) else ""}>🚫 Не страхован</option>
+            </select>
+          </td>
           <td><input type="text" name="propId_{idx}" value="{v.get('propId') or ''}" placeholder="ID" style="width:90px"></td>
           <td><input type="text" name="pos_{idx}" value="{v.get('pos') or ''}" placeholder="pos" style="width:90px"></td>
-          <td><input type="number" name="dropAt_{idx}" value="{v.get('dropAt') if v.get('dropAt') is not None else ''}" placeholder="Порог" style="width:70px"></td>
+          <td style="text-align:center"><input type="checkbox" name="manual_time_{idx}" style="width:auto" title="Задать время слёта вручную вместо авторасчёта"></td>
           <td><input type="datetime-local" name="expiry_{idx}" value="{dt_local}" style="width:190px"></td>
           <td style="text-align:center"><input type="checkbox" name="delete_{idx}" style="width:auto"></td>
         </tr>
@@ -1277,9 +1290,10 @@ def admin_properties_batch_edit():
     <div class="card" style="overflow-x:auto">
       <form method="post" action="{url_for('admin_properties_batch_update')}">
         <table>
-          <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>D</th><th>ID</th><th>pos</th><th>Порог</th><th>Время слёта</th><th>Удалить</th></tr>
+          <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>Страховка</th><th>ID</th><th>pos</th><th>Вручную?</th><th>Время слёта</th><th>Удалить</th></tr>
           {rows}
         </table>
+        <div style="margin-top:8px;color:var(--muted);font-size:12px">Если отмечено «Вручную» — используется указанное время слёта, иначе оно пересчитается автоматически по PD и порогу сервера.</div>
         <input type="hidden" name="count" value="{len(entries)}">
         <div style="margin-top:16px">
           <button type="submit">Сохранить все</button>
@@ -1325,32 +1339,23 @@ def admin_properties_batch_update():
             pd = int(request.form.get(f"pd_{sidx}", 0))
         except Exception:
             pd = 0
-        try:
-            d_val = int(request.form.get(f"d_{sidx}", DEFAULT_D))
-        except Exception:
-            d_val = DEFAULT_D
+        insured = request.form.get(f"insured_{sidx}", "1") == "1"
+        d_val = D_INSURED if insured else D_UNINSURED
         prop_id = request.form.get(f"propId_{sidx}", "").strip() or None
         pos = request.form.get(f"pos_{sidx}", "").strip() or None
-        drop_raw = request.form.get(f"dropAt_{sidx}", "").strip()
+        manual_time = request.form.get(f"manual_time_{sidx}") == "on"
         expiry_str = request.form.get(f"expiry_{sidx}", "").strip()
 
-        if drop_raw:
+        if manual_time and expiry_str:
             try:
-                drop_at = int(drop_raw)
-                expiry_ts = calc_expiry_from_pdl(pd, d_val, drop_at)
+                dt = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M")
+                expiry_ts = int(dt.replace(tzinfo=MSK_TZ).timestamp())
             except Exception:
                 expiry_ts = int(now)
-                drop_at = None
-        else:
-            if expiry_str:
-                try:
-                    dt = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M")
-                    expiry_ts = int(dt.replace(tzinfo=MSK_TZ).timestamp())
-                except Exception:
-                    expiry_ts = int(now)
-            else:
-                expiry_ts = int(now)
             drop_at = None
+        else:
+            drop_at = get_drop_at(new_server, insured)
+            expiry_ts = calc_expiry_from_pdl(pd, d_val, drop_at)
 
         new_record = {
             "server": new_server,
@@ -1360,6 +1365,7 @@ def admin_properties_batch_update():
             "scanTs": now,
             "propId": prop_id,
             "pos": pos,
+            "insured": insured,
             "dropAt": drop_at,
             "d": d_val,
             "count": 1,
@@ -1439,12 +1445,15 @@ def admin_property_edit(server, key):
           <input type="number" name="pd" value="{v.get('pd', 0)}" min="1" max="65" required>
         </div>
         <div class="row" style="margin-bottom:10px">
-          <label style="width:140px;color:var(--muted)">Сколько отнимается (D)</label>
-          <input type="number" name="d" value="{v.get('d', DEFAULT_D)}" min="1">
+          <label style="width:140px;color:var(--muted)">Застрахован</label>
+          <select name="insured">
+            <option value="1" {"selected" if infer_insured(v) else ""}>🛡 Страхован (1 PD/час)</option>
+            <option value="0" {"selected" if not infer_insured(v) else ""}>🚫 Не страхован (2 PD/час)</option>
+          </select>
         </div>
         <div class="row" style="margin-bottom:10px">
-          <label style="width:140px;color:var(--muted)">Порог</label>
-          <input type="number" name="dropAt" value="{v.get('dropAt') if v.get('dropAt') is not None else ''}" min="0" max="10" placeholder="если пусто — используется дата ниже">
+          <label style="width:140px;color:var(--muted)">Время слёта вручную</label>
+          <input type="checkbox" name="manual_time" style="width:auto">
         </div>
         <div class="row" style="margin-bottom:10px">
           <label style="width:140px;color:var(--muted)">Время слёта</label>
@@ -1487,18 +1496,12 @@ def admin_property_update(server, key):
     prop_id    = request.form.get("propId", "").strip()
     pos        = request.form.get("pos", "").strip()
     expiry_str = request.form.get("expiry", "")
-    drop_raw   = request.form.get("dropAt", "").strip()
-    d_raw      = request.form.get("d", "").strip()
+    manual_time = request.form.get("manual_time") == "on"
+    insured    = request.form.get("insured", "1" if infer_insured(old) else "0") == "1"
     try:
         pd = int(request.form.get("pd", 0))
     except ValueError:
         flash_msg("err", "Неверный PD")
-        return redirect(url_for("admin_property_edit", server=server, key=key))
-
-    try:
-        d_val = int(d_raw) if d_raw != "" else old.get("d", DEFAULT_D)
-    except ValueError:
-        flash_msg("err", "Неверное значение 'Сколько отнимается'")
         return redirect(url_for("admin_property_edit", server=server, key=key))
 
     if new_server not in VALID_SERVERS or prop_type not in ("house", "business"):
@@ -1511,28 +1514,19 @@ def admin_property_update(server, key):
         flash_msg("err", "PayDay должен быть 1–65")
         return redirect(url_for("admin_property_edit", server=server, key=key))
 
-    drop_at = None
-    if drop_raw:
+    d_val = D_INSURED if insured else D_UNINSURED
+
+    if manual_time and expiry_str:
         try:
-            drop_at = int(drop_raw)
-        except ValueError:
-            flash_msg("err", "Неверное значение Порог")
-            return redirect(url_for("admin_property_edit", server=server, key=key))
-        if d_val <= 0:
-            flash_msg("err", "Значение 'Сколько отнимается' должно быть >=1")
-            return redirect(url_for("admin_property_edit", server=server, key=key))
-        expiry_ts = calc_expiry_from_pdl(pd, d_val, drop_at)
-    else:
-        try:
-            if expiry_str:
-                dt = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M")
-                expiry_ts = int(dt.replace(tzinfo=MSK_TZ).timestamp())
-            else:
-                flash_msg("err", "Укажите Порог или время слёта")
-                return redirect(url_for("admin_property_edit", server=server, key=key))
+            dt = _dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M")
+            expiry_ts = int(dt.replace(tzinfo=MSK_TZ).timestamp())
         except Exception:
             flash_msg("err", "Неверный формат времени")
             return redirect(url_for("admin_property_edit", server=server, key=key))
+        drop_at = None
+    else:
+        drop_at = get_drop_at(new_server, insured)
+        expiry_ts = calc_expiry_from_pdl(pd, d_val, drop_at)
 
     updated = dict(old)
     updated.update({
@@ -1542,8 +1536,9 @@ def admin_property_update(server, key):
         "expiryTs": expiry_ts,
         "propId":   prop_id or None,
         "pos":      pos or None,
-        "dropAt":   drop_at if drop_at is not None else old.get("dropAt"),
-        "d":        d_val if d_val is not None else old.get("d", DEFAULT_D),
+        "insured":  insured,
+        "dropAt":   drop_at,
+        "d":        d_val,
     })
 
     if new_server != server:
@@ -1564,23 +1559,24 @@ def admin_settings():
     for s in SERVER_ORDER:
         if s not in VALID_SERVERS:
             continue
-        house_val = get_drop_at_cached(dropat_cfg, s, "house")
-        biz_val   = get_drop_at_cached(dropat_cfg, s, "business")
+        insured_val   = get_drop_at_cached(dropat_cfg, s, True)
+        uninsured_val = get_drop_at_cached(dropat_cfg, s, False)
         rows += f"""<tr>
           <td>{s}</td>
-          <td><input type="number" name="house_{s}" value="{house_val}" min="0" max="10" style="width:80px"></td>
-          <td><input type="number" name="business_{s}" value="{biz_val}" min="0" max="10" style="width:80px"></td>
+          <td><input type="number" name="insured_{s}" value="{insured_val}" min="0" max="10" style="width:80px"></td>
+          <td><input type="number" name="uninsured_{s}" value="{uninsured_val}" min="0" max="10" style="width:80px"></td>
         </tr>"""
     body = f"""
     <h1>Настройки</h1>
     <div class="card">
       <p style="color:var(--muted);margin-top:0">
-        Порог (L) — значение PayDay, при достижении которого объект считается слетевшим.
-        Используется для расчёта времени слёта по формуле PD/D/L, если при добавлении/редактировании записи не указано время вручную.
+        Порог (L) — значение PayDay, при достижении которого дом считается слетевшим. Свой порог задаётся отдельно
+        для застрахованных домов (теряют 1 PD в час) и незастрахованных (теряют 2 PD в час) на каждом сервере.
+        Используется для автоматического расчёта времени слёта при добавлении/редактировании записи.
       </p>
       <form method="post" action="{url_for('admin_settings_save')}">
         <table>
-          <tr><th>Сервер</th><th>🏠 Порог (дом)</th><th>🏢 Порог (бизнес)</th></tr>
+          <tr><th>Сервер</th><th>🛡 Порог (страхованный)</th><th>🚫 Порог (нестрахованный)</th></tr>
           {rows}
         </table>
         <div style="margin-top:14px"><button type="submit">Сохранить</button></div>
@@ -1595,15 +1591,15 @@ def admin_settings_save():
     for s in SERVER_ORDER:
         if s not in VALID_SERVERS:
             continue
-        for ptype in ("house", "business"):
-            raw = request.form.get(f"{ptype}_{s}", "").strip()
+        for form_key, db_key in (("insured_", "insured"), ("uninsured_", "uninsured")):
+            raw = request.form.get(f"{form_key}{s}", "").strip()
             if raw == "":
                 continue
             try:
                 val = int(raw)
             except ValueError:
                 continue
-            set_drop_at(s, ptype, val)
+            set_drop_at(s, db_key, val)
             updated += 1
     flash_msg("ok", f"Настройки сохранены ({updated} значений)")
     return redirect(url_for("admin_settings"))
