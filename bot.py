@@ -1,4 +1,4 @@
-import asyncio, time, os, json
+import asyncio, time, os, json, secrets, string
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
@@ -29,6 +29,10 @@ HISTORY_HOURS  = 5
 DELETE_AFTER   = 86400
 MASS_DROP_MIN  = 4
 SCRIPT_PATH    = os.path.join(os.path.dirname(__file__), "property_tracker.luac")
+KEY_ALPHABET      = string.ascii_uppercase + string.digits
+KEY_GROUP_LEN     = 4
+KEY_GROUPS        = 3
+EXPIRY_WARN_HOURS = 24  # за сколько часов до истечения подписки напоминать продлить
 
 SERVER_ORDER = [
     "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg", "Saint-Rose",
@@ -90,6 +94,8 @@ notified             = set()
 sent_notifications   = defaultdict(list)
 all_users            = set()
 banned_users = set()   # { chat_id }
+subscriptions        = {}   # { chat_id(int): expires_at(int ts) }
+expiry_warned        = set()   # { chat_id } — кому уже напомнили о скором истечении
 
 def load_banned():
     ref  = db.reference("banned")
@@ -98,6 +104,74 @@ def load_banned():
 
 def is_banned(chat_id):
     return int(chat_id) in banned_users
+
+def load_subscriptions():
+    ref  = db.reference("subscriptions")
+    data = ref.get() or {}
+    result = {}
+    for k, v in data.items():
+        if isinstance(v, dict) and v.get("expires_at"):
+            result[int(k)] = int(v["expires_at"])
+    return result
+
+def is_authorized(chat_id):
+    if int(chat_id) == ADMIN_ID:
+        return True
+    exp = subscriptions.get(int(chat_id))
+    return exp is not None and exp > int(time.time())
+
+def get_expiry(chat_id):
+    return subscriptions.get(int(chat_id))
+
+def generate_key():
+    group = lambda: "".join(secrets.choice(KEY_ALPHABET) for _ in range(KEY_GROUP_LEN))
+    return "-".join(group() for _ in range(KEY_GROUPS))
+
+def create_keys(duration_days, count, created_by):
+    now  = int(time.time())
+    keys = []
+    for _ in range(count):
+        key = generate_key()
+        db.reference(f"access_keys/{key}").set({
+            "duration_days": duration_days,
+            "created_at":    now,
+            "created_by":    created_by,
+            "activated":     False,
+        })
+        keys.append(key)
+    return keys
+
+def activate_key(chat_id, raw_key):
+    key = raw_key.strip().upper()
+    ref = db.reference(f"access_keys/{key}")
+    data = ref.get()
+    if not data or not isinstance(data, dict):
+        return None, "notfound"
+    if data.get("activated"):
+        return None, "used"
+
+    now      = int(time.time())
+    duration = int(data.get("duration_days", 0)) * 86400
+    current  = subscriptions.get(int(chat_id), 0)
+    base     = max(now, current)
+    expires_at = base + duration
+
+    ref.update({
+        "activated":     True,
+        "activated_by":  chat_id,
+        "activated_at":  now,
+    })
+    db.reference(f"subscriptions/{chat_id}").set({
+        "key":          key,
+        "expires_at":   expires_at,
+        "activated_at": now,
+    })
+    subscriptions[int(chat_id)] = expires_at
+    expiry_warned.discard(int(chat_id))
+    return expires_at, "ok"
+
+def format_expiry(ts):
+    return datetime.fromtimestamp(ts, tz=MSK).strftime("%d.%m.%Y %H:%M МСК")
     
 _props_cache      = []
 _props_cache_time = 0
@@ -333,11 +407,23 @@ def _page_buttons(page, total, prefix):
 
 # ── /start ────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if is_banned(update.effective_chat.id):
+    chat_id = update.effective_chat.id
+    if is_banned(chat_id):
         await update.message.reply_text("⛔️ Вы заблокированы и не можете использовать этого бота.")
         return
-    all_users.add(update.effective_chat.id)
-    save_user(update.effective_chat.id, update.effective_user)
+    all_users.add(chat_id)
+    save_user(chat_id, update.effective_user)
+
+    if not is_authorized(chat_id):
+        await update.message.reply_text(
+            "🔑 *Arizona Property Tracker*\n\n"
+            "Доступ к боту закрыт по ключу.\n"
+            "Пришли свой ключ доступа одним сообщением, например:\n"
+            "`AB12-CD34-EF56`",
+            parse_mode="Markdown"
+        )
+        return
+
     text = (
         "🏙 *Arizona Property Tracker*\n\n"
         "Добро пожаловать! Этот бот помогает отслеживать слёты домов и бизнесов "
@@ -433,6 +519,59 @@ async def cmd_unban(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     db.reference(f"banned/{uid}").delete()
     await update.message.reply_text(f"✅ Пользователь {uid} разблокирован.")
 
+async def cmd_genkey(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return
+    args = ctx.args
+    if not args:
+        await update.message.reply_text(
+            "Использование:\n/genkey ДНЕЙ [КОЛИЧЕСТВО]\n\n"
+            "Пример: /genkey 30 5 — 5 ключей на 30 дней"
+        )
+        return
+    try:
+        days  = int(args[0])
+        count = int(args[1]) if len(args) > 1 else 1
+    except ValueError:
+        await update.message.reply_text("❌ Неверные параметры.")
+        return
+    if days <= 0 or count <= 0 or count > 50:
+        await update.message.reply_text("❌ Дни > 0, количество от 1 до 50.")
+        return
+
+    keys = create_keys(days, count, update.effective_chat.id)
+    text = f"🔑 Создано ключей: {count} (на {days} дн.)\n\n" + "\n".join(f"`{k}`" for k in keys)
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def cmd_extend(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return
+    args = ctx.args
+    if len(args) < 2:
+        await update.message.reply_text("Использование:\n/extend ID ДНЕЙ")
+        return
+    try:
+        uid  = int(args[0])
+        days = int(args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Неверные параметры.")
+        return
+
+    now        = int(time.time())
+    current    = subscriptions.get(uid, 0)
+    base       = max(now, current)
+    expires_at = base + days * 86400
+    db.reference(f"subscriptions/{uid}").set({
+        "key":          "manual_admin",
+        "expires_at":   expires_at,
+        "activated_at": now,
+    })
+    subscriptions[uid] = expires_at
+    expiry_warned.discard(uid)
+    await update.message.reply_text(f"✅ Доступ для {uid} продлён до {format_expiry(expires_at)}")
+
 async def cmd_banlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_ID:
         await update.message.reply_text("❌ Нет доступа.")
@@ -450,12 +589,28 @@ async def cmd_banlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if is_banned(update.effective_chat.id):
+    chat_id = update.effective_chat.id
+    if is_banned(chat_id):
         await update.message.reply_text("⛔️ Вы заблокированы и не можете использовать этого бота.")
         return
-    all_users.add(update.effective_chat.id)
-    save_user(update.effective_chat.id, update.effective_user)
+    all_users.add(chat_id)
+    save_user(chat_id, update.effective_user)
     t = update.message.text
+
+    if not is_authorized(chat_id):
+        expires_at, status = activate_key(chat_id, t)
+        if status == "ok":
+            await update.message.reply_text(
+                f"✅ Ключ активирован!\nДоступ действует до: *{format_expiry(expires_at)}*",
+                parse_mode="Markdown", reply_markup=permanent_keyboard()
+            )
+        elif status == "used":
+            await update.message.reply_text("❌ Этот ключ уже был активирован.")
+        else:
+            await update.message.reply_text(
+                "❌ Неверный ключ.\nПришли корректный ключ доступа одним сообщением."
+            )
+        return
     if t == "📋 Все слёты":          await show_list(update, ctx)
     elif t == "⚠️ Ближайшие":        await show_soon(update, ctx)
     elif t == "💥 Массовый слёт":    await show_mass_drop(update, ctx)
@@ -606,8 +761,11 @@ async def show_profile(update, ctx):
     notify_str = ", ".join(f"{m}м" for m in sorted(selected)) if selected else "не настроено"
     lot_str    = ", ".join(f"{m}м" for m in sorted(lot_sel)) if lot_sel else "не настроено"
     fav_str    = ", ".join(sorted(favs)) if favs else "не выбраны"
+    exp        = get_expiry(chat_id)
+    access_str = f"до {format_expiry(exp)}" if exp else "нет"
     text = (
         f"👤 *Профиль*\n\n"
+        f"🔑 Доступ: {access_str}\n\n"
         f"🔔 Уведомления слётов: {'✅ Вкл' if is_sub else '❌ Выкл'}\n"
         f"⏱ Предупреждать за: {notify_str}\n\n"
         f"🎰 Уведомления лотерея: {'✅ Вкл' if is_lot else '❌ Выкл'}\n"
@@ -728,9 +886,17 @@ async def show_about(update, ctx):
 # ── Callbacks ─────────────────────────────────────────────
 async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query   = update.callback_query
+    chat_id = query.message.chat_id
+
+    if is_banned(chat_id):
+        await query.answer("⛔️ Вы заблокированы.", show_alert=True)
+        return
+    if not is_authorized(chat_id):
+        await query.answer("🔑 Доступ закрыт. Пришли ключ доступа боту.", show_alert=True)
+        return
+
     await query.answer()
     data    = query.data
-    chat_id = query.message.chat_id
 
     if data.startswith("list_page_"):
         await show_list(update, ctx, page=int(data.split("_")[-1]))
@@ -898,6 +1064,8 @@ async def notify_loop(app):
         prev_props = props
         for p in props:
             for chat_id in list(subscribers):
+                if not is_authorized(chat_id):
+                    continue
                 selected = user_notify_minutes.get(chat_id, set())
                 for mins in selected:
                     if p["minsLeft"] <= mins:
@@ -924,6 +1092,8 @@ async def lottery_loop(app):
         await asyncio.sleep(30)
         now_msk = datetime.now(tz=MSK)
         for chat_id in list(lottery_subscribers):
+            if not is_authorized(chat_id):
+                continue
             selected = lottery_notify_mins.get(chat_id, set())
             for mins in selected:
                 notify_hour   = 21
@@ -965,10 +1135,35 @@ async def season_notify_loop(app):
                     lines.append(f"{str(i+1).zfill(2)} - {season_emoji} {season_name}")
                 text = "\n".join(lines)
                 for chat_id in list(season_subscribers):
+                    if not is_authorized(chat_id):
+                        continue
                     try:
                         await app.bot.send_message(chat_id, text, parse_mode="Markdown")
                     except Exception:
                         pass
+
+async def subscription_expiry_loop(app):
+    """Напоминает пользователям за EXPIRY_WARN_HOURS до истечения ключа."""
+    while True:
+        await asyncio.sleep(1800)
+        now = int(time.time())
+        for chat_id, exp in list(subscriptions.items()):
+            if exp <= now:
+                continue
+            if chat_id in expiry_warned:
+                continue
+            if exp - now <= EXPIRY_WARN_HOURS * 3600:
+                expiry_warned.add(chat_id)
+                try:
+                    await app.bot.send_message(
+                        chat_id,
+                        f"⏳ *Доступ скоро закончится!*\n"
+                        f"Действует до: {format_expiry(exp)}\n\n"
+                        f"Пришли новый ключ, чтобы продлить доступ.",
+                        parse_mode="Markdown"
+                    )
+                except Exception:
+                    pass
 
 async def cleanup_history():
     while True:
@@ -983,10 +1178,11 @@ async def cleanup_history():
 
 # ── Запуск ────────────────────────────────────────────────
 def main():
-    global all_users, banned_users
-    all_users    = load_users()
-    banned_users = load_banned()
-    print(f"Загружено пользователей: {len(all_users)}")
+    global all_users, banned_users, subscriptions
+    all_users     = load_users()
+    banned_users  = load_banned()
+    subscriptions = load_subscriptions()
+    print(f"Загружено пользователей: {len(all_users)}, активных ключей: {len(subscriptions)}")
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",     cmd_start))
@@ -996,6 +1192,8 @@ def main():
     app.add_handler(CommandHandler("ban",      cmd_ban))
     app.add_handler(CommandHandler("unban",    cmd_unban))
     app.add_handler(CommandHandler("banlist",  cmd_banlist))
+    app.add_handler(CommandHandler("genkey",   cmd_genkey))
+    app.add_handler(CommandHandler("extend",   cmd_extend))
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -1005,6 +1203,7 @@ def main():
     loop.create_task(ping_loop())
     loop.create_task(delete_old_notifications(app))
     loop.create_task(cleanup_history())
+    loop.create_task(subscription_expiry_loop(app))
 
     print("Бот запущен!")
     app.run_polling()
