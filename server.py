@@ -282,7 +282,7 @@ form.inline{display:inline}
 def render_page(title, active, body):
     nav_items = [
         ("dashboard", "Дашборд"), ("keys", "Ключи"), ("users", "Пользователи"),
-        ("properties", "Слёты"), ("broadcast", "Рассылка"),
+        ("properties", "Слёты"), ("expired", "Истёкшие"), ("broadcast", "Рассылка"),
     ]
     nav = "".join(
         f'<a href="{url_for("admin_"+ep)}" class="{"active" if active==ep else ""}">{label}</a>'
@@ -554,29 +554,11 @@ def admin_user_unban(uid):
     return redirect(url_for("admin_users"))
 
 # ── Слёты (properties) ────────────────────────────────────
-@app.route("/admin/properties")
-@login_required
-def admin_properties():
-    now      = int(time.time())
-    data     = db.reference("properties").get() or {}
-    srv_filter = request.args.get("server", "")
-
-    all_entries = []
-    for srv, entries in data.items():
-        if not isinstance(entries, dict):
-            continue
-        if srv_filter and srv != srv_filter:
-            continue
-        for k, v in entries.items():
-            if not isinstance(v, dict):
-                continue
-            all_entries.append((srv, k, v))
-
-    # Ближайшие слёты — первыми
-    all_entries.sort(key=lambda item: item[2].get("expiryTs", 0))
-
+def _render_property_rows(entries, back_endpoint="admin_properties"):
+    """entries: list of (srv, key, value_dict), already sorted. Returns table rows HTML."""
+    now = int(time.time())
     rows = ""
-    for i, (srv, k, v) in enumerate(all_entries):
+    for i, (srv, k, v) in enumerate(entries):
         expiry = v.get("expiryTs", 0)
         expired = expiry <= now
         when = time.strftime("%d.%m.%Y %H:%M", time.localtime(expiry)) if expiry else "—"
@@ -586,7 +568,9 @@ def admin_properties():
 
         del_btn = (
             f'<form class="inline" method="post" action="{url_for("admin_property_delete", server=srv, key=k)}" '
-            f'onsubmit="return confirm(\'Удалить запись?\')"><button class="danger" type="submit">Удалить</button></form>'
+            f'onsubmit="return confirm(\'Удалить запись?\')">'
+            f'<input type="hidden" name="back" value="{back_endpoint}">'
+            f'<button class="danger" type="submit">Удалить</button></form>'
         )
         edit_btn = f'<button class="ghost" type="button" onclick="toggleEdit(\'{row_id}\')">Изменить</button>'
 
@@ -603,6 +587,7 @@ def admin_properties():
         <tr id='edit-{row_id}' style='display:none'>
           <td colspan='7'>
             <form method="post" action="{url_for('admin_property_update', server=srv, key=k)}" class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+              <input type="hidden" name="back" value="{back_endpoint}">
               <select name="server">{server_opts}</select>
               <select name="propType">
                 <option value="house" {"selected" if v.get("propType")=="house" else ""}>🏠 house</option>
@@ -617,6 +602,47 @@ def admin_properties():
             </form>
           </td>
         </tr>"""
+    return rows
+
+
+def _collect_property_entries(srv_filter):
+    data = db.reference("properties").get() or {}
+    all_entries = []
+    for srv, entries in data.items():
+        if not isinstance(entries, dict):
+            continue
+        if srv_filter and srv != srv_filter:
+            continue
+        for k, v in entries.items():
+            if not isinstance(v, dict):
+                continue
+            all_entries.append((srv, k, v))
+    return all_entries
+
+
+TOGGLE_EDIT_SCRIPT = """
+    <script>
+    function toggleEdit(id) {
+      var view = document.getElementById('view-' + id);
+      var edit = document.getElementById('edit-' + id);
+      if (!view || !edit) return;
+      var editing = edit.style.display !== 'none';
+      view.style.display = editing ? '' : 'none';
+      edit.style.display = editing ? 'none' : '';
+    }
+    </script>"""
+
+
+@app.route("/admin/properties")
+@login_required
+def admin_properties():
+    now        = int(time.time())
+    srv_filter = request.args.get("server", "")
+
+    all_entries = [e for e in _collect_property_entries(srv_filter) if e[2].get("expiryTs", 0) > now]
+    # Ближайшие слёты — первыми
+    all_entries.sort(key=lambda item: item[2].get("expiryTs", 0))
+    rows = _render_property_rows(all_entries, back_endpoint="admin_properties")
 
     server_options = "".join(
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
@@ -648,17 +674,39 @@ def admin_properties():
       <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>ID/поз.</th><th>Слёт</th><th>Статус</th><th></th></tr>
       {rows or "<tr><td colspan='7'>Записей нет</td></tr>"}
     </table>
-    <script>
-    function toggleEdit(id) {{
-      var view = document.getElementById('view-' + id);
-      var edit = document.getElementById('edit-' + id);
-      if (!view || !edit) return;
-      var editing = edit.style.display !== 'none';
-      view.style.display = editing ? '' : 'none';
-      edit.style.display = editing ? 'none' : '';
-    }}
-    </script>"""
+    {TOGGLE_EDIT_SCRIPT}"""
     return render_page("Слёты", "properties", body)
+
+
+@app.route("/admin/properties/expired")
+@login_required
+def admin_expired():
+    now        = int(time.time())
+    srv_filter = request.args.get("server", "")
+
+    all_entries = [e for e in _collect_property_entries(srv_filter) if e[2].get("expiryTs", 0) <= now]
+    # Недавно истёкшие — первыми
+    all_entries.sort(key=lambda item: item[2].get("expiryTs", 0), reverse=True)
+    rows = _render_property_rows(all_entries, back_endpoint="admin_expired")
+
+    server_options = "".join(
+        f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
+    )
+    body = f"""
+    <h1>Истёкшие слёты</h1>
+    <div class="card row">
+      <form method="get">
+        <select name="server" onchange="this.form.submit()">
+          <option value="">Все серверы</option>{server_options}
+        </select>
+      </form>
+    </div>
+    <table>
+      <tr><th>Сервер</th><th>Тип</th><th>PD</th><th>ID/поз.</th><th>Слёт</th><th>Статус</th><th></th></tr>
+      {rows or "<tr><td colspan='7'>Истёкших записей нет</td></tr>"}
+    </table>
+    {TOGGLE_EDIT_SCRIPT}"""
+    return render_page("Истёкшие", "expired", body)
 
 @app.route("/admin/properties/add", methods=["POST"])
 @login_required
@@ -694,9 +742,12 @@ def admin_property_add():
 @app.route("/admin/properties/<server>/<key>/delete", methods=["POST"])
 @login_required
 def admin_property_delete(server, key):
+    back = request.form.get("back", "admin_properties")
+    if back not in ("admin_properties", "admin_expired"):
+        back = "admin_properties"
     db.reference(f"properties/{server}/{key}").delete()
     flash_msg("ok", "Запись удалена")
-    return redirect(url_for("admin_properties"))
+    return redirect(url_for(back))
 
 @app.route("/admin/properties/<server>/<key>/edit", methods=["GET"])
 @login_required
@@ -752,10 +803,14 @@ def admin_property_edit(server, key):
 @app.route("/admin/properties/<server>/<key>/update", methods=["POST"])
 @login_required
 def admin_property_update(server, key):
+    back = request.form.get("back", "admin_properties")
+    if back not in ("admin_properties", "admin_expired"):
+        back = "admin_properties"
+
     old = db.reference(f"properties/{server}/{key}").get()
     if not old or not isinstance(old, dict):
         flash_msg("err", "Запись не найдена")
-        return redirect(url_for("admin_properties"))
+        return redirect(url_for(back))
 
     new_server = request.form.get("server", server)
     prop_type  = request.form.get("propType", "house")
@@ -799,7 +854,7 @@ def admin_property_update(server, key):
         db.reference(f"properties/{server}/{key}").set(updated)
 
     flash_msg("ok", "Запись обновлена")
-    return redirect(url_for("admin_properties"))
+    return redirect(url_for(back))
 
 # ── Рассылка ──────────────────────────────────────────────
 @app.route("/admin/broadcast")
