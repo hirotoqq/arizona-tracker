@@ -491,7 +491,7 @@ async def show_list(update, ctx, page=0):
     btns = _page_buttons(page, total, "list")
     kb   = InlineKeyboardMarkup(btns) if btns else None
     if update.message:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
     else:
         await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
 
@@ -500,9 +500,9 @@ async def show_soon(update, ctx, page=0):
     text, total = build_list_text(props, "⚠️ Слёты в ближайшие 3 часа", no_pages=True)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄", callback_data="soon_refresh")]]) 
     if update.message:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
     else:
-        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
 
 async def show_mass_drop(update, ctx, page=0):
     props    = get_all_props()
@@ -511,9 +511,9 @@ async def show_mass_drop(update, ctx, page=0):
     btns = _page_buttons(page, total, "mass")
     kb   = InlineKeyboardMarkup(btns) if btns else None
     if update.message:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=kb)
     else:
-        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=kb)
 
 async def show_filter_menu(update, ctx):
     buttons = []
