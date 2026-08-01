@@ -885,21 +885,6 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
     return rows
 
 
-def _collect_property_entries(srv_filter):
-    data = db.reference("properties").get() or {}
-    all_entries = []
-    for srv, entries in data.items():
-        if not isinstance(entries, dict):
-            continue
-        if srv_filter and srv != srv_filter:
-            continue
-        for k, v in entries.items():
-            if not isinstance(v, dict):
-                continue
-            all_entries.append((srv, k, v))
-    return all_entries
-
-
 TOGGLE_EDIT_SCRIPT = """
     <script>
     function toggleEdit(id) {
@@ -936,8 +921,8 @@ def admin_properties():
     </div>
     """
 
-    # JS для массовых операций: используем url_for внутри f-string (в контексте запроса)
-    batch_js = f"""
+    # JS for batch actions: build as plain string and replace placeholders with urls
+    batch_js = """
     <script>
     (function(){
       function getSelected(){
@@ -958,12 +943,12 @@ def admin_properties():
       document.addEventListener('click', function(e){
         if(!e.target) return;
         if(e.target.id==='select-all'){ e.preventDefault(); var all=document.querySelectorAll('.sel-row'); var allChecked=true; all.forEach(function(cb){ if(!cb.checked) allChecked=false; }); all.forEach(function(cb){ cb.checked = !allChecked; }); }
-        if(e.target.id==='edit-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } post('{url_for('admin_properties_batch_edit')}', s); }
-        if(e.target.id==='delete-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } if(!confirm('Удалить выбранные записи?')) return; post('{url_for('admin_properties_batch_delete')}', s); }
+        if(e.target.id==='edit-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } post("__EDIT_URL__", s); }
+        if(e.target.id==='delete-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } if(!confirm('Удалить выбранные записи?')) return; post("__DELETE_URL__", s); }
       });
     })();
     </script>
-    """
+    """.replace("__EDIT_URL__", url_for('admin_properties_batch_edit')).replace("__DELETE_URL__", url_for('admin_properties_batch_delete'))
 
     body = f"""
     <h1>Данные о слётах</h1>
@@ -1028,7 +1013,7 @@ def admin_expired():
     </div>
     """
 
-    batch_js = f"""
+    batch_js = """
     <script>
     (function(){
       function getSelected(){
@@ -1049,12 +1034,12 @@ def admin_expired():
       document.addEventListener('click', function(e){
         if(!e.target) return;
         if(e.target.id==='select-all'){ e.preventDefault(); var all=document.querySelectorAll('.sel-row'); var allChecked=true; all.forEach(function(cb){ if(!cb.checked) allChecked=false; }); all.forEach(function(cb){ cb.checked = !allChecked; }); }
-        if(e.target.id==='edit-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } post('{url_for('admin_properties_batch_edit')}', s); }
-        if(e.target.id==='delete-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } if(!confirm('Удалить выбранные записи?')) return; post('{url_for('admin_properties_batch_delete')}', s); }
+        if(e.target.id==='edit-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } post("__EDIT_URL__", s); }
+        if(e.target.id==='delete-selected'){ e.preventDefault(); var s=getSelected(); if(!s.length){ alert('Ничего не выбрано'); return; } if(!confirm('Удалить выбранные записи?')) return; post("__DELETE_URL__", s); }
       });
     })();
     </script>
-    """
+    """.replace("__EDIT_URL__", url_for('admin_properties_batch_edit')).replace("__DELETE_URL__", url_for('admin_properties_batch_delete'))
 
     body = f"""
     <h1>Истёкшие слёты</h1>
@@ -1329,7 +1314,7 @@ def admin_property_edit(server, key):
       <form method="post" action="{url_for('admin_property_update', server=server, key=key)}">
         <div class="row" style="margin-bottom:10px">
           <label style="width:140px;color:var(--muted)">Сервер</label>
-          <select name="server" required>{server_opts:=server_options}</select>
+          <select name="server" required>{server_options}</select>
         </div>
         <div class="row" style="margin-bottom:10px">
           <label style="width:140px;color:var(--muted)">Тип</label>
