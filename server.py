@@ -817,6 +817,20 @@ def admin_settings_save():
     return redirect(url_for("admin_settings"))
 
 # ── Слёты (properties) ────────────────────────────────────
+def _collect_property_entries(srv_filter):
+    data = db.reference("properties").get() or {}
+    all_entries = []
+    for srv, entries in data.items():
+        if not isinstance(entries, dict):
+            continue
+        if srv_filter and srv != srv_filter:
+            continue
+        for k, v in entries.items():
+            if not isinstance(v, dict):
+                continue
+            all_entries.append((srv, k, v))
+    return all_entries
+
 def _render_property_rows(entries, back_endpoint="admin_properties"):
     """entries: list of (srv, key, value_dict), already sorted. Returns table rows HTML."""
     now = int(time.time())
@@ -885,23 +899,6 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
     return rows
 
 
-def _collect_property_entries(srv_filter):
-    """Собирает все записи properties из Firebase, опционально фильтруя по серверу.
-    Возвращает список кортежей (server, key, value_dict).
-    """
-    data = db.reference("properties").get() or {}
-    all_entries = []
-    for srv, entries in data.items():
-        if not isinstance(entries, dict):
-            continue
-        if srv_filter and srv != srv_filter:
-            continue
-        for k, v in entries.items():
-            if not isinstance(v, dict):
-                continue
-            all_entries.append((srv, k, v))
-    return all_entries
-    
 TOGGLE_EDIT_SCRIPT = """
     <script>
     function toggleEdit(id) {
@@ -929,7 +926,8 @@ def admin_properties():
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
     )
 
-        action_panel = f"""
+    # enhanced action panel with titles/explanations
+    action_panel = f"""
     <div class="card" style="padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <div style="text-align:center;min-width:140px">
         <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Выбор строк</div>
@@ -1036,7 +1034,7 @@ def admin_expired():
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
     )
 
-        action_panel = f"""
+    action_panel = f"""
     <div class="card" style="padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <div style="text-align:center;min-width:140px">
         <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Выбор строк</div>
