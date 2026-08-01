@@ -100,6 +100,21 @@ def get_drop_at(server, prop_type):
         return SERVER_DROP_AT_BIZ.get(server, DEFAULT_DROP_AT_BIZ)
     return SERVER_DROP_AT_HOUSE.get(server, DEFAULT_DROP_AT_HOUSE)
 
+def get_drop_at_cached(cfg_map, server, prop_type):
+    """Как get_drop_at, но без похода в Firebase — использует уже загруженный
+    целиком словарь config/dropAt. Нужно, чтобы не делать по одному запросу
+    к базе на каждую строку таблицы (именно это тормозило вкладку 'Слёты')."""
+    val = None
+    if isinstance(cfg_map, dict):
+        srv_cfg = cfg_map.get(server)
+        if isinstance(srv_cfg, dict):
+            val = srv_cfg.get(prop_type)
+    if isinstance(val, (int, float)):
+        return int(val)
+    if prop_type == "business":
+        return SERVER_DROP_AT_BIZ.get(server, DEFAULT_DROP_AT_BIZ)
+    return SERVER_DROP_AT_HOUSE.get(server, DEFAULT_DROP_AT_HOUSE)
+
 def set_drop_at(server, prop_type, value):
     db.reference(f"config/dropAt/{server}/{prop_type}").set(int(value))
 
@@ -746,6 +761,9 @@ def admin_user_unban(uid):
 
 # Properties functions
 def _collect_property_entries(srv_filter):
+    """Собирает все записи properties из Firebase, опционально фильтруя по серверу.
+    Возвращает список кортежей (server, key, value_dict).
+    """
     data = db.reference("properties").get() or {}
     all_entries = []
     for srv, entries in data.items():
@@ -759,9 +777,14 @@ def _collect_property_entries(srv_filter):
             all_entries.append((srv, k, v))
     return all_entries
 
-def _render_property_rows(entries, back_endpoint="admin_properties"):
+def _render_property_rows(entries, back_endpoint="admin_properties", dropat_cfg=None):
     now = int(time.time())
+    if dropat_cfg is None:
+        dropat_cfg = {}
     rows = ""
+    # Кэшируем HTML списка серверов на строку, чтобы не пересобирать 32 <option>
+    # заново для каждой записи — только когда меняется выбранный сервер.
+    server_opts_cache = {}
     for i, (srv, k, v) in enumerate(entries):
         expiry = v.get("expiryTs", 0)
         expired = expiry <= now
@@ -779,7 +802,7 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
         edit_btn = f'<button class="ghost" type="button" onclick="toggleEdit(\'{row_id}\')">Изменить</button>'
 
         drop_val = v.get("dropAt")
-        drop_default = drop_val if drop_val is not None else get_drop_at(srv, v.get("propType", "house"))
+        drop_default = drop_val if drop_val is not None else get_drop_at_cached(dropat_cfg, srv, v.get("propType", "house"))
         drop_display = str(drop_default) + ('' if drop_val is not None else ' <span style="color:var(--muted)">(по умолч.)</span>')
 
         d_val = v.get("d", DEFAULT_D)
@@ -794,10 +817,12 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
             f"<td>{when}</td><td>{status}</td><td class='row'>{edit_btn}{del_btn}</td></tr>"
         )
 
-        server_opts = "".join(
-            f'<option value="{s}" {"selected" if s == srv else ""}>{server_label(s)}</option>'
-            for s in SERVER_ORDER if s in VALID_SERVERS
-        )
+        if srv not in server_opts_cache:
+            server_opts_cache[srv] = "".join(
+                f'<option value="{s}" {"selected" if s == srv else ""}>{server_label(s)}</option>'
+                for s in SERVER_ORDER if s in VALID_SERVERS
+            )
+        server_opts = server_opts_cache[srv]
         rows += f"""
         <tr id='edit-{row_id}' style='display:none'>
           <td colspan='10'>
@@ -825,23 +850,6 @@ def _render_property_rows(entries, back_endpoint="admin_properties"):
         </tr>"""
     return rows
 
-def _collect_property_entries(srv_filter):
-    """Собирает все записи properties из Firebase, опционально фильтруя по серверу.
-    Возвращает список кортежей (server, key, value_dict).
-    """
-    data = db.reference("properties").get() or {}
-    all_entries = []
-    for srv, entries in data.items():
-        if not isinstance(entries, dict):
-            continue
-        if srv_filter and srv != srv_filter:
-            continue
-        for k, v in entries.items():
-            if not isinstance(v, dict):
-                continue
-            all_entries.append((srv, k, v))
-    return all_entries
-    
 TOGGLE_EDIT_SCRIPT = """
     <script>
     function toggleEdit(id) {
@@ -860,9 +868,13 @@ def admin_properties():
     now        = int(time.time())
     srv_filter = request.args.get("server", "")
 
+    # Загружаем конфиг порогов ОДНИМ запросом, а не по одному на каждую запись —
+    # раньше именно это (N+1 запросов к Firebase) тормозило открытие вкладки
+    dropat_cfg = db.reference("config/dropAt").get() or {}
+
     all_entries = [e for e in _collect_property_entries(srv_filter) if e[2].get("expiryTs", 0) > now]
     all_entries.sort(key=lambda item: item[2].get("expiryTs", 0))
-    rows = _render_property_rows(all_entries, back_endpoint="admin_properties")
+    rows = _render_property_rows(all_entries, back_endpoint="admin_properties", dropat_cfg=dropat_cfg)
 
     server_options = "".join(
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
@@ -1016,9 +1028,11 @@ def admin_expired():
     now        = int(time.time())
     srv_filter = request.args.get("server", "")
 
+    dropat_cfg = db.reference("config/dropAt").get() or {}
+
     all_entries = [e for e in _collect_property_entries(srv_filter) if e[2].get("expiryTs", 0) <= now]
     all_entries.sort(key=lambda item: item[2].get("expiryTs", 0), reverse=True)
-    rows = _render_property_rows(all_entries, back_endpoint="admin_expired")
+    rows = _render_property_rows(all_entries, back_endpoint="admin_expired", dropat_cfg=dropat_cfg)
 
     server_options = "".join(
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
@@ -1528,6 +1542,59 @@ def admin_property_update(server, key):
 
     flash_msg("ok", "Запись обновлена")
     return redirect(url_for(back))
+
+# ── Настройки (пороги слёта по серверам) ─────────────────
+@app.route("/admin/settings")
+@login_required
+def admin_settings():
+    dropat_cfg = db.reference("config/dropAt").get() or {}
+    rows = ""
+    for s in SERVER_ORDER:
+        if s not in VALID_SERVERS:
+            continue
+        house_val = get_drop_at_cached(dropat_cfg, s, "house")
+        biz_val   = get_drop_at_cached(dropat_cfg, s, "business")
+        rows += f"""<tr>
+          <td>{s}</td>
+          <td><input type="number" name="house_{s}" value="{house_val}" min="0" max="10" style="width:80px"></td>
+          <td><input type="number" name="business_{s}" value="{biz_val}" min="0" max="10" style="width:80px"></td>
+        </tr>"""
+    body = f"""
+    <h1>Настройки</h1>
+    <div class="card">
+      <p style="color:var(--muted);margin-top:0">
+        Порог (L) — значение PayDay, при достижении которого объект считается слетевшим.
+        Используется для расчёта времени слёта по формуле PD/D/L, если при добавлении/редактировании записи не указано время вручную.
+      </p>
+      <form method="post" action="{url_for('admin_settings_save')}">
+        <table>
+          <tr><th>Сервер</th><th>🏠 Порог (дом)</th><th>🏢 Порог (бизнес)</th></tr>
+          {rows}
+        </table>
+        <div style="margin-top:14px"><button type="submit">Сохранить</button></div>
+      </form>
+    </div>"""
+    return render_page("Настройки", "settings", body)
+
+@app.route("/admin/settings/save", methods=["POST"])
+@login_required
+def admin_settings_save():
+    updated = 0
+    for s in SERVER_ORDER:
+        if s not in VALID_SERVERS:
+            continue
+        for ptype in ("house", "business"):
+            raw = request.form.get(f"{ptype}_{s}", "").strip()
+            if raw == "":
+                continue
+            try:
+                val = int(raw)
+            except ValueError:
+                continue
+            set_drop_at(s, ptype, val)
+            updated += 1
+    flash_msg("ok", f"Настройки сохранены ({updated} значений)")
+    return redirect(url_for("admin_settings"))
 
 @app.route("/admin/broadcast")
 @login_required
