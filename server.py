@@ -106,6 +106,21 @@ def calc_expiry_ts(pd, drop_at, now=None):
     future_msk -= future_msk % 3600
     return future_msk - MSK_OFFSET
 
+def calc_expiry_from_pdl(pd, d, l, now=None):
+    """Формула по P/D/L (не связана с 'Дропом'):
+    P — текущий Payday, D — на сколько Payday уменьшается каждый час,
+    L — порог слёта (Payday, при достижении которого дом упадёт на след. час).
+    hoursLeft = floor((P - L) / D) + 1, время округляется вниз до часа по МСК."""
+    if now is None:
+        now = int(time.time())
+    if d <= 0:
+        d = 1
+    hours_left  = max((pd - l) // d + 1, 0)
+    future_utc  = now + hours_left * 3600
+    future_msk  = future_utc + MSK_OFFSET
+    future_msk -= future_msk % 3600
+    return future_msk - MSK_OFFSET
+
 KEY_ALPHABET  = string.ascii_uppercase + string.digits
 KEY_GROUP_LEN = 4
 KEY_GROUPS    = 3
