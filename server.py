@@ -929,11 +929,26 @@ def admin_properties():
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
     )
 
-    action_panel = f"""
-    <div class="card row" style="align-items:center">
-      <button id="select-all" class="ghost">Выбрать всё</button>
-      <button id="edit-selected">Изменить выбранные</button>
-      <button id="delete-selected" class="danger">Удалить выбранные</button>
+        action_panel = f"""
+    <div class="card" style="padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <div style="text-align:center;min-width:140px">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Выбор строк</div>
+        <button id="select-all" class="ghost">Выбрать всё</button>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">Отметить / снять все строки в таблице</div>
+      </div>
+
+      <div style="text-align:center;min-width:180px">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое редактирование</div>
+        <button id="edit-selected">Изменить выбранные</button>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">Открыть форму, где можно отредактировать несколько записей и сохранить их разом</div>
+      </div>
+
+      <div style="text-align:center;min-width:160px">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое удаление</div>
+        <button id="delete-selected" class="danger">Удалить выбранные</button>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">Удалить отмеченные записи (будет запрос подтверждения)</div>
+      </div>
+
       <div style="flex:1"></div>
     </div>
     """
@@ -1021,11 +1036,26 @@ def admin_expired():
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
     )
 
-    action_panel = f"""
-    <div class="card row" style="align-items:center">
-      <button id="select-all" class="ghost">Выбрать всё</button>
-      <button id="edit-selected">Изменить выбранные</button>
-      <button id="delete-selected" class="danger">Удалить выбранные</button>
+        action_panel = f"""
+    <div class="card" style="padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+      <div style="text-align:center;min-width:140px">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Выбор строк</div>
+        <button id="select-all" class="ghost">Выбрать всё</button>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">Отметить / снять все строки в таблице</div>
+      </div>
+
+      <div style="text-align:center;min-width:180px">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое редактирование</div>
+        <button id="edit-selected">Изменить выбранные</button>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">Открыть форму, где можно отредактировать несколько записей и сохранить их разом</div>
+      </div>
+
+      <div style="text-align:center;min-width:160px">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Массовое удаление</div>
+        <button id="delete-selected" class="danger">Удалить выбранные</button>
+        <div style="font-size:12px;color:var(--muted);margin-top:6px">Удалить отмеченные записи (будет запрос подтверждения)</div>
+      </div>
+
       <div style="flex:1"></div>
     </div>
     """
