@@ -3,6 +3,7 @@ import firebase_admin
 from firebase_admin import credentials, db
 import os, time, json, threading, secrets, string
 from functools import wraps
+from datetime import timedelta
 import requests
 
 app = Flask(__name__)
@@ -24,6 +25,9 @@ BOT_TOKEN  = os.environ.get("BOT_TOKEN", "")
 ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 app.secret_key = os.environ.get("FLASK_SECRET_KEY") or secrets.token_hex(32)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=90)
+app.config["SESSION_COOKIE_SECURE"]      = True
+app.config["SESSION_COOKIE_SAMESITE"]    = "Lax"
 
 VALID_SERVERS = {
     "Phoenix","Tucson","Scottdale","Chandler","Brainburg","Saint-Rose",
@@ -32,6 +36,20 @@ VALID_SERVERS = {
     "Page","Sun-City","Queen-Creek","Sedona","Holiday","Wednesday",
     "Yava","Faraway","Bumble Bee","Christmas","Love","Mirage","Drake","Space",
 }
+
+SERVER_ORDER = [
+    "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg", "Saint-Rose",
+    "Mesa", "Red-Rock", "Yuma", "Surprise", "Prescott", "Glendale",
+    "Kingman", "Winslow", "Payson", "Gilbert", "Show Low", "Casa-Grande",
+    "Page", "Sun-City", "Queen-Creek", "Sedona", "Holiday", "Wednesday",
+    "Yava", "Faraway", "Bumble Bee", "Christmas", "Love", "Mirage",
+    "Drake", "Space",
+]
+
+def server_label(srv):
+    if srv in SERVER_ORDER:
+        return f"{SERVER_ORDER.index(srv) + 1:02d}. {srv}"
+    return srv
 
 KEY_ALPHABET  = string.ascii_uppercase + string.digits
 KEY_GROUP_LEN = 4
@@ -303,6 +321,7 @@ def admin_login():
                 not secrets.compare_digest(p, ADMIN_PASSWORD)):
             error = '<div class="flash err">Неверный логин или пароль</div>'
         else:
+            session.permanent = True
             session["admin_logged_in"] = True
             return redirect(url_for("admin_dashboard"))
     else:
@@ -545,7 +564,8 @@ def admin_properties():
     srv_filter = request.args.get("server", "")
 
     rows = ""
-    for srv in sorted(data.keys()):
+    server_keys = sorted(data.keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999)
+    for srv in server_keys:
         entries = data[srv]
         if not isinstance(entries, dict):
             continue
@@ -562,13 +582,14 @@ def admin_properties():
                 f'<form class="inline" method="post" action="{url_for("admin_property_delete", server=srv, key=k)}" '
                 f'onsubmit="return confirm(\'Удалить запись?\')"><button class="danger" type="submit">Удалить</button></form>'
             )
+            edit_btn = f'<a href="{url_for("admin_property_edit", server=srv, key=k)}"><button class="ghost" type="button">Изменить</button></a>'
             rows += (
-                f"<tr><td>{srv}</td><td>{v.get('propType','?')}</td><td>{v.get('pd','—')}</td>"
-                f"<td>{v.get('propId') or v.get('pos') or '—'}</td><td>{when}</td><td>{status}</td><td>{del_btn}</td></tr>"
+                f"<tr><td>{server_label(srv)}</td><td>{v.get('propType','?')}</td><td>{v.get('pd','—')}</td>"
+                f"<td>{v.get('propId') or v.get('pos') or '—'}</td><td>{when}</td><td>{status}</td><td class='row'>{edit_btn}{del_btn}</td></tr>"
             )
 
     server_options = "".join(
-        f'<option value="{s}" {"selected" if s == srv_filter else ""}>{s}</option>' for s in sorted(VALID_SERVERS)
+        f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
     )
     body = f"""
     <h1>Данные о слётах</h1>
@@ -635,6 +656,109 @@ def admin_property_add():
 def admin_property_delete(server, key):
     db.reference(f"properties/{server}/{key}").delete()
     flash_msg("ok", "Запись удалена")
+    return redirect(url_for("admin_properties"))
+
+@app.route("/admin/properties/<server>/<key>/edit", methods=["GET"])
+@login_required
+def admin_property_edit(server, key):
+    v = db.reference(f"properties/{server}/{key}").get()
+    if not v or not isinstance(v, dict):
+        flash_msg("err", "Запись не найдена")
+        return redirect(url_for("admin_properties"))
+
+    expiry    = v.get("expiryTs", 0)
+    dt_local  = time.strftime("%Y-%m-%dT%H:%M", time.localtime(expiry)) if expiry else ""
+    server_options = "".join(
+        f'<option value="{s}" {"selected" if s == server else ""}>{server_label(s)}</option>'
+        for s in SERVER_ORDER if s in VALID_SERVERS
+    )
+    body = f"""
+    <h1>Редактирование записи</h1>
+    <div class="card" style="max-width:480px">
+      <form method="post" action="{url_for('admin_property_update', server=server, key=key)}">
+        <div class="row" style="margin-bottom:10px">
+          <label style="width:140px;color:var(--muted)">Сервер</label>
+          <select name="server" required>{server_options}</select>
+        </div>
+        <div class="row" style="margin-bottom:10px">
+          <label style="width:140px;color:var(--muted)">Тип</label>
+          <select name="propType" required>
+            <option value="house" {"selected" if v.get("propType")=="house" else ""}>🏠 house</option>
+            <option value="business" {"selected" if v.get("propType")=="business" else ""}>🏢 business</option>
+          </select>
+        </div>
+        <div class="row" style="margin-bottom:10px">
+          <label style="width:140px;color:var(--muted)">PayDay (PD)</label>
+          <input type="number" name="pd" value="{v.get('pd', 0)}" min="1" max="65" required>
+        </div>
+        <div class="row" style="margin-bottom:10px">
+          <label style="width:140px;color:var(--muted)">Время слёта</label>
+          <input type="datetime-local" name="expiry" value="{dt_local}" required>
+        </div>
+        <div class="row" style="margin-bottom:10px">
+          <label style="width:140px;color:var(--muted)">ID</label>
+          <input type="text" name="propId" value="{v.get('propId') or ''}">
+        </div>
+        <div class="row" style="margin-bottom:16px">
+          <label style="width:140px;color:var(--muted)">Позиция</label>
+          <input type="text" name="pos" value="{v.get('pos') or ''}">
+        </div>
+        <button type="submit">Сохранить</button>
+        <a href="{url_for('admin_properties')}"><button type="button" class="ghost">Отмена</button></a>
+      </form>
+    </div>"""
+    return render_page("Редактирование", "properties", body)
+
+@app.route("/admin/properties/<server>/<key>/update", methods=["POST"])
+@login_required
+def admin_property_update(server, key):
+    old = db.reference(f"properties/{server}/{key}").get()
+    if not old or not isinstance(old, dict):
+        flash_msg("err", "Запись не найдена")
+        return redirect(url_for("admin_properties"))
+
+    new_server = request.form.get("server", server)
+    prop_type  = request.form.get("propType", "house")
+    prop_id    = request.form.get("propId", "").strip()
+    pos        = request.form.get("pos", "").strip()
+    expiry_str = request.form.get("expiry", "")
+    try:
+        pd = int(request.form.get("pd", 0))
+    except ValueError:
+        flash_msg("err", "Неверный PD")
+        return redirect(url_for("admin_property_edit", server=server, key=key))
+
+    if new_server not in VALID_SERVERS or prop_type not in ("house", "business"):
+        flash_msg("err", "Неверный сервер или тип")
+        return redirect(url_for("admin_property_edit", server=server, key=key))
+    if pd <= 0 or pd > 65:
+        flash_msg("err", "PayDay должен быть 1–65")
+        return redirect(url_for("admin_property_edit", server=server, key=key))
+
+    try:
+        import datetime as _dt
+        expiry_ts = int(_dt.datetime.strptime(expiry_str, "%Y-%m-%dT%H:%M").timestamp())
+    except ValueError:
+        flash_msg("err", "Неверный формат времени")
+        return redirect(url_for("admin_property_edit", server=server, key=key))
+
+    updated = dict(old)
+    updated.update({
+        "server":   new_server,
+        "propType": prop_type,
+        "pd":       pd,
+        "expiryTs": expiry_ts,
+        "propId":   prop_id or None,
+        "pos":      pos or None,
+    })
+
+    if new_server != server:
+        db.reference(f"properties/{server}/{key}").delete()
+        db.reference(f"properties/{new_server}/{key}").set(updated)
+    else:
+        db.reference(f"properties/{server}/{key}").set(updated)
+
+    flash_msg("ok", "Запись обновлена")
     return redirect(url_for("admin_properties"))
 
 # ── Рассылка ──────────────────────────────────────────────
