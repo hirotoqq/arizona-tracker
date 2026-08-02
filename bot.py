@@ -646,8 +646,20 @@ async def show_soon(update, ctx, page=0):
         await update.callback_query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
 
 async def show_mass_drop(update, ctx, page=0):
-    props    = get_all_props()
-    filtered = [p for p in props if p.get("count", 1) >= MASS_DROP_MIN]
+    props = get_all_props()
+    # У каждой отдельной записи в базе count всегда = 1 (одна запись = один
+    # объект), поэтому раньше фильтр по p["count"] никогда не срабатывал.
+    # "Массовый слёт" — это когда на одном сервере в одно и то же время
+    # слетает несколько объектов, поэтому считаем это группировкой здесь.
+    groups = defaultdict(list)
+    for p in props:
+        groups[(p["server"], p["expiryTs"])].append(p)
+
+    filtered = []
+    for items in groups.values():
+        if len(items) >= MASS_DROP_MIN:
+            filtered.extend(items)
+
     header, block, total = build_list_text(filtered, f"💥 Массовые слёты ({MASS_DROP_MIN}+)", page=page)
     btns = _page_buttons(page, total, "mass")
     kb   = InlineKeyboardMarkup(btns) if btns else None
