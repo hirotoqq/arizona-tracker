@@ -69,6 +69,7 @@ DEFAULT_DROP_AT_UNINSURED = 3
 D_INSURED   = 1   # застрахованный дом теряет 1 PD в час
 D_UNINSURED = 2   # незастрахованный дом теряет 2 PD в час
 DEFAULT_D = D_INSURED
+HISTORY_RETENTION_SECONDS = 30 * 24 * 3600  # хранить историю сканов домов без ID 30 дней
 
 # Порог слёта (L) по каждому серверу — отдельно для застрахованных и незастрахованных домов
 SERVER_DROP_AT_INSURED = {
@@ -250,6 +251,8 @@ def update():
         and v.get("expiryTs", 0) > now
     }
 
+    autodetect_writes = {}
+
     written = 0
     for e in entries:
         pd = e.get("pd", 0)
@@ -261,54 +264,105 @@ def update():
         prop_id = e.get("propId")
         pos     = e.get("pos")
 
-        # Бот больше не считает время слёта и порог сам (раньше пороги были
-        # захардкожены в Lua-скрипте и дублировали настройки админки).
-        # Теперь это единственный источник истины — считаем здесь, по порогам
-        # из базы (админка → Настройки). Бот не умеет определять застрахован
-        # ли дом, поэтому по умолчанию считаем "застрахован"; при необходимости
-        # админ может поправить это вручную в панели.
-        insured = e.get("insured")
-        insured = bool(insured) if isinstance(insured, bool) else True
+        # Ключ записи должен быть стабильным между сканами одного и того же
+        # дома — иначе каждый скан плодит новую запись вместо обновления
+        # старой. Для домов с ID — ключ по ID. Для домов без ID — по позиции
+        # в списке (раньше ключ включал время слёта, из-за чего записи не
+        # обновлялись, а копились дублями).
+        if prop_id:
+            key = f"{e['propType']}_{prop_id}"
+        else:
+            key = f"{e['propType']}_pos_{pos or 0}"
+
+        # ------------------------------------------------------------
+        # Автоопределение "застрахован / не застрахован": сравниваем новый
+        # скан с предыдущим сканом ТОГО ЖЕ дома — только когда есть propId.
+        # Для домов без ID позиция ненадёжна как идентификатор одного и того
+        # же дома между сканами (список может перестроиться), поэтому для
+        # них автоопределение не делаем — см. раздел "Риелторка".
+        # ------------------------------------------------------------
+        old_rec = existing.get(key) if prop_id else None
+        prev_insured = old_rec.get("insured") if isinstance(old_rec, dict) else None
+        prev_insured = prev_insured if isinstance(prev_insured, bool) else None
+
+        client_insured = e.get("insured")
+        client_insured = client_insured if isinstance(client_insured, bool) else None
+
+        detected_insured = None
+        if isinstance(old_rec, dict):
+            old_pd      = old_rec.get("pd")
+            old_scan_ts = old_rec.get("scanTs")
+            if isinstance(old_pd, (int, float)) and old_scan_ts:
+                elapsed_hours = round((now - int(old_scan_ts)) / 3600)
+                delta = int(old_pd) - pd
+                if elapsed_hours >= 1 and delta > 0:
+                    expected_insured   = elapsed_hours * D_INSURED
+                    expected_uninsured = elapsed_hours * D_UNINSURED
+                    if delta == expected_insured:
+                        detected_insured = True
+                    elif delta == expected_uninsured:
+                        detected_insured = False
+                    else:
+                        guess = True if abs(delta - expected_insured) <= abs(delta - expected_uninsured) else False
+                        autodetect_writes[key] = {
+                            "server": server, "propType": e["propType"],
+                            "propId": prop_id, "pos": pos,
+                            "oldPd": int(old_pd), "newPd": pd,
+                            "elapsedHours": elapsed_hours, "delta": delta,
+                            "guess": "insured" if guess else "uninsured",
+                            "createdAt": now,
+                        }
+
+        if client_insured is not None:
+            insured = client_insured
+        elif detected_insured is not None:
+            insured = detected_insured
+        elif prev_insured is not None:
+            insured = prev_insured
+        else:
+            insured = True  # новый дом, доказательств пока нет — по умолчанию застрахован
+
         d_val   = D_INSURED if insured else D_UNINSURED
         drop_at = get_drop_at(server, insured)
         expiry_h = calc_expiry_from_pdl(pd, d_val, drop_at, now)
         if expiry_h <= now:
             continue
 
-        if prop_id:
-            key = f"{e['propType']}_{prop_id}"
-            kept[key] = {
-                "server":   server,
-                "propType": e["propType"],
-                "pd":       pd,
-                "expiryTs": expiry_h,
-                "scanTs":   now,
-                "propId":   prop_id,
-                "pos":      pos,
-                "insured":  insured,
-                "dropAt":   drop_at,
-                "d":        d_val,
-                "count":    1,
-            }
-        else:
-            key = f"{e['propType']}_{expiry_h}_{pos or 0}"
-            if key not in kept:
-                kept[key] = {
-                    "server":   server,
-                    "propType": e["propType"],
-                    "pd":       pd,
-                    "expiryTs": expiry_h,
-                    "scanTs":   now,
-                    "propId":   None,
-                    "pos":      pos,
-                    "insured":  insured,
-                    "dropAt":   drop_at,
-                    "d":        d_val,
-                    "count":    1,
-                }
+        kept[key] = {
+            "server":   server,
+            "propType": e["propType"],
+            "pd":       pd,
+            "expiryTs": expiry_h,
+            "scanTs":   now,
+            "propId":   prop_id,
+            "pos":      pos,
+            "insured":  insured,
+            "dropAt":   drop_at,
+            "d":        d_val,
+            "count":    1,
+        }
         written += 1
 
+        # Для домов без ID сохраняем каждый скан в историю (для "Риелторки") —
+        # у них нет автоопределения страховки, поэтому нужно копить лог
+        # PD во времени, чтобы можно было сравнить вручную любые два скана.
+        if not prop_id:
+            db.reference(f"history/{server}/{key}/{now}").set({"pd": pd})
+            # чистим записи старше 30 дней, чтобы история не росла бесконечно
+            hist = db.reference(f"history/{server}/{key}").get() or {}
+            if isinstance(hist, dict):
+                cutoff = now - HISTORY_RETENTION_SECONDS
+                for ts_str in list(hist.keys()):
+                    try:
+                        if int(ts_str) < cutoff:
+                            db.reference(f"history/{server}/{key}/{ts_str}").delete()
+                    except ValueError:
+                        continue
+
     ref.set(kept)
+    if autodetect_writes:
+        for k, v in autodetect_writes.items():
+            db.reference(f"autodetect/{server}/{k}").set(v)
     return jsonify({"ok": True, "written": written})
 
 @app.route("/list", methods=["GET"])
@@ -577,7 +631,7 @@ def render_page(title, active, body):
         nav_items = [
             ("dashboard", "Дашборд"), ("keys", "Ключи"), ("users", "Пользователи"),
             ("properties", "Слёты"), ("expired", "Истёкшие"), ("settings", "Настройки"),
-            ("editors", "Редакторы"), ("broadcast", "Рассылка"),
+            ("editors", "Редакторы"), ("autodetect", "Автоопределения"), ("realtor", "Риелторка"), ("broadcast", "Рассылка"),
         ]
     nav = "".join(
         f'<a href="{url_for("admin_"+ep)}" class="{"active" if active==ep else ""}">{label}</a>'
@@ -1557,6 +1611,7 @@ def admin_property_update(server, key):
         "propType": prop_type,
         "pd":       pd,
         "expiryTs": expiry_ts,
+        "scanTs":   int(time.time()),  # свежий ввод PD — отсчёт распада начинается заново
         "propId":   prop_id or None,
         "pos":      pos or None,
         "insured":  insured,
@@ -1786,6 +1841,296 @@ def admin_editor_delete(eid):
     db.reference(f"editors/{eid}").delete()
     flash_msg("ok", "Редактор удалён")
     return redirect(url_for("admin_editors"))
+
+# ── Автоопределения страховки (спорные случаи на ручную проверку) ─
+@app.route("/admin/autodetect")
+@admin_only
+def admin_autodetect():
+    data = db.reference("autodetect").get() or {}
+    rows = ""
+    count = 0
+    for srv, entries in data.items():
+        if not isinstance(entries, dict):
+            continue
+        for key, v in entries.items():
+            if not isinstance(v, dict):
+                continue
+            count += 1
+            guess = v.get("guess", "")
+            guess_label = "🛡 Страхован" if guess == "insured" else ("🚫 Не страхован" if guess == "uninsured" else "—")
+            created = format_msk(v.get("createdAt", 0), "%d.%m.%Y %H:%M")
+            rows += f"""
+            <tr>
+              <td>{srv}</td>
+              <td>{v.get("propType","?")}</td>
+              <td>{v.get("propId") or v.get("pos") or "—"}</td>
+              <td>{v.get("oldPd")} → {v.get("newPd")} <span style="color:var(--muted)">(−{v.get("delta")} за {v.get("elapsedHours")}ч)</span></td>
+              <td>{guess_label}</td>
+              <td>{created}</td>
+              <td class="row">
+                <form class="inline" method="post" action="{url_for('admin_autodetect_resolve', server=srv, key=key)}">
+                  <input type="hidden" name="insured" value="1">
+                  <button type="submit" class="ghost">🛡 Страхован</button>
+                </form>
+                <form class="inline" method="post" action="{url_for('admin_autodetect_resolve', server=srv, key=key)}">
+                  <input type="hidden" name="insured" value="0">
+                  <button type="submit" class="ghost">🚫 Не страхован</button>
+                </form>
+                <form class="inline" method="post" action="{url_for('admin_autodetect_reject', server=srv, key=key)}">
+                  <button type="submit" class="danger">Отклонить</button>
+                </form>
+              </td>
+            </tr>
+            """
+    body = f"""
+    <h1>Автоопределения{f" ({count})" if count else ""}</h1>
+    <div class="card">
+      <p style="color:var(--muted);margin-top:0">
+        Сюда попадают дома, для которых бот не смог однозначно понять — застрахованы они или нет
+        (падение PD между двумя сканами не совпало ровно с 1 или 2 в час — например, дом просканировали
+        через 2+ часа, или PD упал на нестандартную величину). Выберите правильный вариант вручную,
+        либо отклоните — тогда текущий статус объекта не изменится.
+      </p>
+    </div>
+    <table>
+      <tr><th>Сервер</th><th>Тип</th><th>ID/поз.</th><th>PD было → стало</th><th>Предположение</th><th>Когда</th><th></th></tr>
+      {rows or "<tr><td colspan='7'>Пока пусто</td></tr>"}
+    </table>"""
+    return render_page("Автоопределения", "autodetect", body)
+
+@app.route("/admin/autodetect/<server>/<key>/resolve", methods=["POST"])
+@admin_only
+def admin_autodetect_resolve(server, key):
+    insured = request.form.get("insured") == "1"
+    prop = db.reference(f"properties/{server}/{key}").get()
+    if isinstance(prop, dict):
+        d_val   = D_INSURED if insured else D_UNINSURED
+        drop_at = get_drop_at(server, insured)
+        db.reference(f"properties/{server}/{key}").update({
+            "insured": insured, "d": d_val, "dropAt": drop_at,
+        })
+    db.reference(f"autodetect/{server}/{key}").delete()
+    flash_msg("ok", "Статус страховки обновлён")
+    return redirect(url_for("admin_autodetect"))
+
+@app.route("/admin/autodetect/<server>/<key>/reject", methods=["POST"])
+@admin_only
+def admin_autodetect_reject(server, key):
+    db.reference(f"autodetect/{server}/{key}").delete()
+    flash_msg("ok", "Предложение отклонено")
+    return redirect(url_for("admin_autodetect"))
+
+# ── Риелторка (история сканов домов без ID + ручное сравнение) ────
+REALTOR_JS = """
+<script>
+function compareRealtor(cardId) {
+  var card = document.getElementById(cardId);
+  var checked = Array.from(card.querySelectorAll('.hist-cb:checked'));
+  var resultEl = document.getElementById(cardId + '-result');
+  if (checked.length !== 2) {
+    resultEl.textContent = 'Выберите ровно 2 скана для сравнения';
+    resultEl.style.color = 'var(--danger)';
+    return;
+  }
+  var a = {ts: parseInt(checked[0].dataset.ts), pd: parseInt(checked[0].dataset.pd)};
+  var b = {ts: parseInt(checked[1].dataset.ts), pd: parseInt(checked[1].dataset.pd)};
+  var older = a.ts < b.ts ? a : b;
+  var newer = a.ts < b.ts ? b : a;
+  var elapsedHours = Math.round((newer.ts - older.ts) / 3600);
+  var delta = older.pd - newer.pd;
+  var text = 'Δ PD = ' + delta + ' за ' + elapsedHours + 'ч. ';
+  if (elapsedHours < 1) {
+    text += 'Слишком мало времени между сканами — сравнение не покажет ничего внятного.';
+  } else if (delta <= 0) {
+    text += 'PD не уменьшился — сравнение не показательно.';
+  } else if (delta === elapsedHours * 1) {
+    text += '→ похоже, ЗАСТРАХОВАН 🛡';
+  } else if (delta === elapsedHours * 2) {
+    text += '→ похоже, НЕ ЗАСТРАХОВАН 🚫';
+  } else {
+    var closerInsured = Math.abs(delta - elapsedHours*1) <= Math.abs(delta - elapsedHours*2);
+    text += '— не совпадает ровно ни с 1, ни с 2 в час; на глаз ближе к ' + (closerInsured ? 'ЗАСТРАХОВАН 🛡' : 'НЕ ЗАСТРАХОВАН 🚫');
+  }
+  resultEl.textContent = text;
+  resultEl.style.color = 'var(--text)';
+}
+function toggleHistory(id) {
+  var el = document.getElementById(id);
+  el.style.display = (el.style.display === 'none') ? '' : 'none';
+}
+</script>
+"""
+
+@app.route("/admin/realtor")
+@admin_only
+def admin_realtor():
+    srv_filter = request.args.get("server", "")
+    asof_str   = request.args.get("asof", "").strip()
+    from_str   = request.args.get("from", "").strip()
+    to_str     = request.args.get("to", "").strip()
+
+    def parse_local_dt(s):
+        if not s:
+            return None
+        try:
+            dt = _dt.datetime.strptime(s, "%Y-%m-%dT%H:%M")
+            return int(dt.replace(tzinfo=MSK_TZ).timestamp())
+        except Exception:
+            try:
+                dt = _dt.datetime.strptime(s, "%Y-%m-%d")
+                return int(dt.replace(tzinfo=MSK_TZ).timestamp())
+            except Exception:
+                return None
+
+    asof_ts = parse_local_dt(asof_str)
+    from_ts = parse_local_dt(from_str)
+    to_ts   = parse_local_dt(to_str)
+    if to_ts is not None:
+        to_ts += 24 * 3600  # включительно весь день "по"
+
+    server_options = "".join(
+        f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
+    )
+
+    body = f"""
+    <h1>Риелторка</h1>
+    <div class="card">
+      <p style="color:var(--muted);margin-top:0">
+        История сканов домов <b>без ID</b> по позициям — для страховки таких домов, которую бот не умеет определять
+        автоматически. Отметьте любые два скана в истории и нажмите «Сравнить», либо укажите «Момент времени»,
+        чтобы увидеть, каким PD был список на тот момент.
+      </p>
+      <form method="get" class="row" style="align-items:center">
+        <select name="server" onchange="this.form.requestSubmit()">
+          <option value="">— выберите сервер —</option>{server_options}
+        </select>
+        <label style="color:var(--muted);font-size:13px">Момент времени
+          <input type="datetime-local" name="asof" value="{asof_str}">
+        </label>
+        <label style="color:var(--muted);font-size:13px">С даты
+          <input type="date" name="from" value="{from_str}">
+        </label>
+        <label style="color:var(--muted);font-size:13px">По дату
+          <input type="date" name="to" value="{to_str}">
+        </label>
+        <button type="submit">Применить</button>
+      </form>
+    </div>
+    """
+
+    if not srv_filter:
+        return render_page("Риелторка", "realtor", body + REALTOR_JS)
+
+    history_data  = db.reference(f"history/{srv_filter}").get() or {}
+    current_props = db.reference(f"properties/{srv_filter}").get() or {}
+
+    cards = ""
+    positions_found = 0
+    for key, entries in sorted(history_data.items()):
+        if not isinstance(entries, dict) or not entries:
+            continue
+        positions_found += 1
+
+        parts = key.split("_pos_")
+        prop_type_label = parts[0] if parts else "?"
+        pos_label        = parts[1] if len(parts) > 1 else "?"
+
+        points = []
+        for ts_str, v in entries.items():
+            try:
+                ts = int(ts_str)
+                pd_val = int(v.get("pd")) if isinstance(v, dict) else None
+            except (ValueError, TypeError):
+                continue
+            if pd_val is None:
+                continue
+            points.append((ts, pd_val))
+        points.sort(key=lambda p: p[0], reverse=True)
+
+        filtered = [p for p in points if (from_ts is None or p[0] >= from_ts) and (to_ts is None or p[0] < to_ts)]
+
+        asof_point = None
+        if asof_ts is not None:
+            candidates = [p for p in points if p[0] <= asof_ts]
+            if candidates:
+                asof_point = max(candidates, key=lambda p: p[0])
+
+        current = current_props.get(key) if isinstance(current_props, dict) else None
+        insured_now = infer_insured(current) if isinstance(current, dict) else None
+        status_pill = (
+            '<span class="pill ok">🛡 Страхован</span>' if insured_now is True else
+            '<span class="pill bad">🚫 Не страхован</span>' if insured_now is False else
+            '<span class="pill muted">нет данных</span>'
+        )
+
+        asof_html = ""
+        if asof_ts is not None:
+            if asof_point:
+                asof_html = f'<div style="margin:8px 0;color:var(--muted)">На момент {asof_str.replace("T"," ")}: <b>{asof_point[1]} PD</b> (скан {format_msk(asof_point[0], "%d.%m.%Y %H:%M")})</div>'
+            else:
+                asof_html = '<div style="margin:8px 0;color:var(--muted)">На этот момент сканов ещё не было</div>'
+
+        card_id = f"card_{key}".replace(" ", "_")
+        rows_html = "".join(
+            f"""<tr>
+                <td><input type="checkbox" class="hist-cb" data-ts="{ts}" data-pd="{pdv}"></td>
+                <td>{format_msk(ts, "%d.%m.%Y %H:%M")}</td>
+                <td>{pdv}</td>
+            </tr>"""
+            for ts, pdv in filtered
+        )
+
+        cards += f"""
+        <div class="card" id="{card_id}">
+          <div class="row" style="justify-content:space-between;align-items:center">
+            <div><b>{prop_type_label}</b>, позиция {pos_label} <span style="color:var(--muted)">({len(filtered)} сканов{'' if from_ts is None and to_ts is None else ' в выбранном периоде'})</span></div>
+            {status_pill}
+          </div>
+          {asof_html}
+          <div class="row" style="margin:8px 0">
+            <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv_filter, key=key)}">
+              <input type="hidden" name="insured" value="1">
+              <button type="submit" class="ghost">🛡 Отметить застрахован</button>
+            </form>
+            <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv_filter, key=key)}">
+              <input type="hidden" name="insured" value="0">
+              <button type="submit" class="ghost">🚫 Отметить не застрахован</button>
+            </form>
+            <button type="button" class="ghost" onclick="toggleHistory('{card_id}_hist')">История ({len(filtered)})</button>
+          </div>
+          <div id="{card_id}_hist" style="display:none">
+            <table>
+              <tr><th style="width:36px"></th><th>Скан</th><th>PD</th></tr>
+              {rows_html or "<tr><td colspan='3'>Нет сканов за выбранный период</td></tr>"}
+            </table>
+            <div class="row" style="margin-top:8px;align-items:center">
+              <button type="button" onclick="compareRealtor('{card_id}')">Сравнить выбранные</button>
+              <span id="{card_id}-result" style="color:var(--muted)"></span>
+            </div>
+          </div>
+        </div>
+        """
+
+    if positions_found == 0:
+        cards = '<div class="card">Для этого сервера пока нет истории сканов домов без ID.</div>'
+
+    return render_page("Риелторка", "realtor", body + cards + REALTOR_JS)
+
+@app.route("/admin/realtor/<server>/<key>/set-insured", methods=["POST"])
+@admin_only
+def admin_realtor_set_insured(server, key):
+    insured = request.form.get("insured") == "1"
+    prop = db.reference(f"properties/{server}/{key}").get()
+    if isinstance(prop, dict):
+        d_val   = D_INSURED if insured else D_UNINSURED
+        drop_at = get_drop_at(server, insured)
+        db.reference(f"properties/{server}/{key}").update({
+            "insured": insured, "d": d_val, "dropAt": drop_at,
+        })
+        flash_msg("ok", "Статус страховки обновлён")
+    else:
+        flash_msg("err", "Запись уже не активна (истекла) — статус не изменён")
+    return redirect(url_for("admin_realtor", server=server))
 
 @app.route("/admin/broadcast")
 @admin_only
