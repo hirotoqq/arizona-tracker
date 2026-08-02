@@ -198,6 +198,19 @@ def save_user(chat_id, user=None):
             data["name"] = user.full_name
     db.reference(f"users/{chat_id}").set(data)
 
+def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
+    """PD на текущий момент: убывает на d_val за каждый прошедший час с
+    момента скана (1/час для застрахованных, 2/час для незастрахованных),
+    но не ниже порога слёта (drop_at)."""
+    if now is None:
+        now = int(time.time())
+    floor_val = drop_at if drop_at is not None else 0
+    if not scan_ts:
+        return max(pd, floor_val)
+    elapsed_hours = max(0, (now - int(scan_ts)) // 3600)
+    current = pd - d_val * elapsed_hours
+    return max(current, floor_val)
+
 def get_all_props():
     global _props_cache, _props_cache_time
     now = int(time.time())
@@ -213,10 +226,18 @@ def get_all_props():
             expiry = v.get("expiryTs", 0)
             if expiry <= now:
                 continue
+            insured = v.get("insured")
+            insured = insured if isinstance(insured, bool) else True
+            d_val   = v.get("d") or (1 if insured else 2)
+            drop_at = v.get("dropAt")
+            base_pd = v.get("pd", 0)
+            current_pd = compute_current_pd(base_pd, v.get("scanTs"), d_val, drop_at, now)
             result.append({
                 "server":    srv,
                 "propType":  v.get("propType", "?"),
-                "pd":        v.get("pd", 0),
+                "pd":        current_pd,
+                "basePd":    base_pd,
+                "insured":   insured,
                 "expiryTs":  expiry,
                 "expiryH":   expiry,
                 "hoursLeft": round((expiry - now) / 3600, 1),

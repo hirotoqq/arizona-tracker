@@ -138,6 +138,18 @@ def infer_insured(v):
         return False
     return True
 
+def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
+    """PD на текущий момент: убывает на d_val за каждый прошедший час с
+    момента скана, но не ниже порога слёта (drop_at)."""
+    if now is None:
+        now = int(time.time())
+    floor_val = drop_at if drop_at is not None else 0
+    if not scan_ts:
+        return max(pd, floor_val)
+    elapsed_hours = max(0, (now - int(scan_ts)) // 3600)
+    current = pd - d_val * elapsed_hours
+    return max(current, floor_val)
+
 def calc_expiry_ts(pd, drop_at, now=None):
     if now is None:
         now = int(time.time())
@@ -908,12 +920,17 @@ def _render_property_rows(entries, back_endpoint="admin_properties", dropat_cfg=
         drop_val = v.get("dropAt")
         drop_default = drop_val if drop_val is not None else get_drop_at_cached(dropat_cfg, srv, insured)
 
+        d_val = D_INSURED if insured else D_UNINSURED
+        base_pd = v.get("pd", 0)
+        current_pd = compute_current_pd(base_pd, v.get("scanTs"), d_val, drop_default, now)
+        pd_display = str(current_pd) if current_pd == base_pd else f"{current_pd} <span style='color:var(--muted)'>(было {base_pd})</span>"
+
         # Checkbox hidden by default; shown only after pressing "Изменить выбранные"
         checkbox = f'<input type="checkbox" class="sel-row" name="selected" value="{srv}|{k}" style="display:none">'
 
         rows += (
             f"<tr id='view-{row_id}'><td style='width:36px'>{checkbox}</td>"
-            f"<td>{server_label(srv)}</td><td>{v.get('propType','?')}</td><td>{v.get('pd','—')}</td>"
+            f"<td>{server_label(srv)}</td><td>{v.get('propType','?')}</td><td>{pd_display}</td>"
             f"<td>{insured_pill}</td><td>{v.get('propId') or v.get('pos') or '—'}</td><td>{drop_default}</td>"
             f"<td>{when}</td><td>{status}</td><td class='row'>{edit_btn}{del_btn}</td></tr>"
         )
@@ -1112,7 +1129,7 @@ def admin_properties():
     </div>
     {action_panel}
     <table>
-      <tr><th style="width:36px"></th><th>Сервер</th><th>Тип</th><th>PD</th><th>Страховка</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
+      <tr><th style="width:36px"></th><th>Сервер</th><th>Тип</th><th>PD (сейчас)</th><th>Страховка</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
       {rows or "<tr><td colspan='10'>Записей нет</td></tr>"}
     </table>
     {batch_js}
@@ -1156,7 +1173,7 @@ def admin_expired():
     </div>
     {action_panel}
     <table>
-      <tr><th style="width:36px"></th><th>Сервер</th><th>Тип</th><th>PD</th><th>Страховка</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
+      <tr><th style="width:36px"></th><th>Сервер</th><th>Тип</th><th>PD (сейчас)</th><th>Страховка</th><th>ID/поз.</th><th>Порог</th><th>Слёт</th><th>Статус</th><th></th></tr>
       {rows or "<tr><td colspan='10'>Истёкших записей нет</td></tr>"}
     </table>
     {batch_js}
