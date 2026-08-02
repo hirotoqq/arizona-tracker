@@ -245,17 +245,23 @@ def update():
             continue
         if e.get("propType") not in ("house", "business"):
             continue
-        expiry_h = (e["expiryTs"] // 3600) * 3600
-        if expiry_h <= now:
-            continue
 
         prop_id = e.get("propId")
         pos     = e.get("pos")
-        drop_at = e.get("dropAt")
-        d_val   = e.get("d", DEFAULT_D)
-        d_val   = int(d_val) if isinstance(d_val, (int, float, str)) and str(d_val).isdigit() else DEFAULT_D
+
+        # Бот больше не считает время слёта и порог сам (раньше пороги были
+        # захардкожены в Lua-скрипте и дублировали настройки админки).
+        # Теперь это единственный источник истины — считаем здесь, по порогам
+        # из базы (админка → Настройки). Бот не умеет определять застрахован
+        # ли дом, поэтому по умолчанию считаем "застрахован"; при необходимости
+        # админ может поправить это вручную в панели.
         insured = e.get("insured")
-        insured = bool(insured) if isinstance(insured, bool) else (d_val <= 1)
+        insured = bool(insured) if isinstance(insured, bool) else True
+        d_val   = D_INSURED if insured else D_UNINSURED
+        drop_at = get_drop_at(server, insured)
+        expiry_h = calc_expiry_from_pdl(pd, d_val, drop_at, now)
+        if expiry_h <= now:
+            continue
 
         if prop_id:
             key = f"{e['propType']}_{prop_id}"
