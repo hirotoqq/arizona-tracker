@@ -2041,8 +2041,11 @@ def _render_snapshot_mode(t_param):
 
             def _sort_key(item):
                 v = item[1]
+                prop_type = v.get("propType") if isinstance(v, dict) else "house"
+                type_rank = 0 if prop_type == "house" else 1  # сначала дома, потом бизнесы
                 pos = v.get("pos") if isinstance(v, dict) else None
-                return pos if isinstance(pos, (int, float)) else 9999
+                pos_rank = pos if isinstance(pos, (int, float)) else 9999
+                return (type_rank, pos_rank)
 
             rows = ""
             for key, v in sorted(entries.items(), key=_sort_key):
@@ -2059,29 +2062,29 @@ def _render_snapshot_mode(t_param):
                 rows += f"""<tr>
                   <td>{v.get('pos','—')}</td>
                   <td>{icon} №{label}</td>
-                  <td><span class="pill bad">Слетит через: {pd_val} Payday</span></td>
+                  <td><span class="pill bad" style="font-size:11px;padding:2px 7px;white-space:nowrap">{pd_val} PD</span></td>
                   <td>{insured_pill}</td>
-                  <td class="row">
+                  <td class="row" style="gap:2px">
                     <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
                       <input type="hidden" name="view" value="snapshot">
                       <input type="hidden" name="t" value="{selected_bucket}">
                       <input type="hidden" name="insured" value="1">
-                      <button type="submit" class="ghost" title="Застрахован">🛡</button>
+                      <button type="submit" class="ghost" title="Застрахован" style="padding:3px 7px;font-size:11px">🛡</button>
                     </form>
                     <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
                       <input type="hidden" name="view" value="snapshot">
                       <input type="hidden" name="t" value="{selected_bucket}">
                       <input type="hidden" name="insured" value="0">
-                      <button type="submit" class="ghost" title="Не застрахован">🚫</button>
+                      <button type="submit" class="ghost" title="Не застрахован" style="padding:3px 7px;font-size:11px">🚫</button>
                     </form>
                   </td>
                 </tr>"""
 
             cards += f"""
-            <div class="card">
-              <div style="font-weight:700;margin-bottom:8px">{server_label(srv)}</div>
-              <table>
-                <tr><th>№</th><th>Объект</th><th>Слёт</th><th></th><th></th></tr>
+            <div class="card" style="padding:10px 12px;font-size:12px">
+              <div style="font-weight:700;margin-bottom:6px;font-size:13px">{server_label(srv)}</div>
+              <table style="font-size:12px">
+                <tr><th style="padding:4px 6px">№</th><th style="padding:4px 6px">Объект</th><th style="padding:4px 6px">Слёт</th><th style="padding:4px 6px"></th><th style="padding:4px 6px"></th></tr>
                 {rows}
               </table>
             </div>"""
@@ -2091,7 +2094,7 @@ def _render_snapshot_mode(t_param):
       <div style="color:var(--muted);font-size:13px;margin-bottom:8px">Раунд сканирования (доступны только часы, когда реально что-то сканировали):</div>
       {time_buttons}
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">
       {cards or "<div class='card'>Нет данных за этот час.</div>"}
     </div>
     """
