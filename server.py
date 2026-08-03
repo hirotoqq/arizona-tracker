@@ -67,12 +67,14 @@ def format_msk(ts, fmt="%d.%m.%Y %H:%M"):
 DEFAULT_DROP_AT_INSURED   = 2
 DEFAULT_DROP_AT_UNINSURED = 3
 D_INSURED   = 1   # застрахованный дом теряет 1 PD в час
-D_UNINSURED = 2   # незастрахованный дом теряет 2 PD в час
+D_UNINSURED = 2   # незастрахованный дом теряет 2 PD в час (максимум возможного распада)
 DEFAULT_D = D_INSURED
 HISTORY_RETENTION_SECONDS = 30 * 24 * 3600  # хранить историю сканов домов без ID 30 дней
 
-# Порог слёта (L) по каждому серверу — отдельно для застрахованных и незастрахованных домов
-SERVER_DROP_AT_INSURED = {
+# Порог слёта (L) по каждому серверу для ДОМОВ — отдельно застрахованные/нет.
+# Для бизнесов отдельной статистики нет, поэтому по умолчанию используются
+# общие значения DEFAULT_DROP_AT_*, а точные пороги задаются в Настройках.
+HOUSE_DROP_AT_INSURED = {
     "Phoenix": 2, "Tucson": 2, "Scottdale": 2, "Chandler": 2,
     "Brainburg": 2, "Saint-Rose": 2, "Mesa": 2, "Red-Rock": 2,
     "Yuma": 2, "Surprise": 2, "Prescott": 2, "Glendale": 2,
@@ -83,7 +85,7 @@ SERVER_DROP_AT_INSURED = {
     "Love": 1, "Mirage": 1, "Drake": 2, "Space": 1,
 }
 
-SERVER_DROP_AT_UNINSURED = {
+HOUSE_DROP_AT_UNINSURED = {
     "Phoenix": 3, "Tucson": 3, "Scottdale": 3, "Chandler": 2,
     "Brainburg": 3, "Saint-Rose": 3, "Mesa": 2, "Red-Rock": 3,
     "Yuma": 3, "Surprise": 3, "Prescott": 3, "Glendale": 3,
@@ -97,19 +99,23 @@ SERVER_DROP_AT_UNINSURED = {
 def _insurance_key(insured):
     return "insured" if insured else "uninsured"
 
-def get_drop_at(server, insured):
+def _default_drop_at(server, prop_type, insured):
+    if prop_type == "house":
+        table = HOUSE_DROP_AT_INSURED if insured else HOUSE_DROP_AT_UNINSURED
+        return table.get(server, DEFAULT_DROP_AT_INSURED if insured else DEFAULT_DROP_AT_UNINSURED)
+    return DEFAULT_DROP_AT_INSURED if insured else DEFAULT_DROP_AT_UNINSURED
+
+def get_drop_at(server, prop_type, insured):
     key = _insurance_key(insured)
     try:
-        cfg = db.reference(f"config/dropAt/{server}/{key}").get()
+        cfg = db.reference(f"config/dropAt/{server}/{prop_type}/{key}").get()
     except Exception:
         cfg = None
     if isinstance(cfg, (int, float)):
         return int(cfg)
-    if insured:
-        return SERVER_DROP_AT_INSURED.get(server, DEFAULT_DROP_AT_INSURED)
-    return SERVER_DROP_AT_UNINSURED.get(server, DEFAULT_DROP_AT_UNINSURED)
+    return _default_drop_at(server, prop_type, insured)
 
-def get_drop_at_cached(cfg_map, server, insured):
+def get_drop_at_cached(cfg_map, server, prop_type, insured):
     """Как get_drop_at, но без похода в Firebase — использует уже загруженный
     целиком словарь config/dropAt. Нужно, чтобы не делать по одному запросу
     к базе на каждую строку таблицы (именно это тормозило вкладку 'Слёты')."""
@@ -118,15 +124,15 @@ def get_drop_at_cached(cfg_map, server, insured):
     if isinstance(cfg_map, dict):
         srv_cfg = cfg_map.get(server)
         if isinstance(srv_cfg, dict):
-            val = srv_cfg.get(key)
+            type_cfg = srv_cfg.get(prop_type)
+            if isinstance(type_cfg, dict):
+                val = type_cfg.get(key)
     if isinstance(val, (int, float)):
         return int(val)
-    if insured:
-        return SERVER_DROP_AT_INSURED.get(server, DEFAULT_DROP_AT_INSURED)
-    return SERVER_DROP_AT_UNINSURED.get(server, DEFAULT_DROP_AT_UNINSURED)
+    return _default_drop_at(server, prop_type, insured)
 
-def set_drop_at(server, prop_type, value):
-    db.reference(f"config/dropAt/{server}/{prop_type}").set(int(value))
+def set_drop_at(server, prop_type, insured_key, value):
+    db.reference(f"config/dropAt/{server}/{prop_type}/{insured_key}").set(int(value))
 
 def infer_insured(v):
     """Определяет застрахован ли дом по записи: явное поле 'insured', иначе
@@ -268,6 +274,7 @@ def update():
     session_writes = {}
 
     autodetect_writes = {}
+    excluded_ids = set(db.reference(f"exceptions/{server}").get(shallow=True) or {})
 
     written = 0
     for e in entries:
@@ -279,6 +286,10 @@ def update():
 
         prop_id = e.get("propId")
         pos     = e.get("pos")
+
+        # Исключённые ID (Настройки → Исключения) никогда не попадают в слёты
+        if prop_id and str(prop_id) in excluded_ids:
+            continue
 
         # Ключ записи должен быть стабильным между сканами одного и того же
         # дома — иначе каждый скан плодит новую запись вместо обновления
@@ -318,6 +329,19 @@ def update():
                         detected_insured = True
                     elif delta == expected_uninsured:
                         detected_insured = False
+                    elif delta > expected_uninsured:
+                        # Физически невозможно: максимум 2 PD/час (незастрахованный).
+                        # Скорее всего это другой дом (переиспользованный ID/позиция)
+                        # или между сканами что-то пропущено — гадать не пытаемся.
+                        autodetect_writes[key] = {
+                            "server": server, "propType": e["propType"],
+                            "propId": prop_id, "pos": pos,
+                            "oldPd": int(old_pd), "newPd": pd,
+                            "elapsedHours": elapsed_hours, "delta": delta,
+                            "guess": None,
+                            "reason": "too_fast",
+                            "createdAt": now,
+                        }
                     else:
                         guess = True if abs(delta - expected_insured) <= abs(delta - expected_uninsured) else False
                         autodetect_writes[key] = {
@@ -326,6 +350,7 @@ def update():
                             "oldPd": int(old_pd), "newPd": pd,
                             "elapsedHours": elapsed_hours, "delta": delta,
                             "guess": "insured" if guess else "uninsured",
+                            "reason": "ambiguous",
                             "createdAt": now,
                         }
 
@@ -339,7 +364,7 @@ def update():
             insured = True  # новый дом, доказательств пока нет — по умолчанию застрахован
 
         d_val   = D_INSURED if insured else D_UNINSURED
-        drop_at = get_drop_at(server, insured)
+        drop_at = get_drop_at(server, e["propType"], insured)
         expiry_h = calc_expiry_from_pdl(pd, d_val, drop_at, now)
         if expiry_h <= now:
             continue
@@ -997,7 +1022,7 @@ def _render_property_rows(entries, back_endpoint="admin_properties", dropat_cfg=
         insured = infer_insured(v)
         insured_pill = '<span class="pill ok">🛡 Страхован</span>' if insured else '<span class="pill bad">🚫 Не страхован</span>'
         drop_val = v.get("dropAt")
-        drop_default = drop_val if drop_val is not None else get_drop_at_cached(dropat_cfg, srv, insured)
+        drop_default = drop_val if drop_val is not None else get_drop_at_cached(dropat_cfg, srv, v.get("propType", "house"), insured)
 
         d_val = D_INSURED if insured else D_UNINSURED
         base_pd = v.get("pd", 0)
@@ -1299,7 +1324,7 @@ def admin_property_add():
         expiry_h = ((now + int(hours * 3600)) // 3600) * 3600
         drop_at = None
     else:
-        drop_at = get_drop_at(server, insured)
+        drop_at = get_drop_at(server, prop_type, insured)
         expiry_h = calc_expiry_from_pdl(pd, d_val, drop_at, now)
 
     key = f"{prop_type}_{prop_id}" if prop_id else f"{prop_type}_{expiry_h}_admin_{secrets.token_hex(3)}"
@@ -1456,7 +1481,7 @@ def admin_properties_batch_update():
                 expiry_ts = int(now)
             drop_at = None
         else:
-            drop_at = get_drop_at(new_server, insured)
+            drop_at = get_drop_at(new_server, prop_type, insured)
             expiry_ts = calc_expiry_from_pdl(pd, d_val, drop_at)
 
         new_record = {
@@ -1627,7 +1652,7 @@ def admin_property_update(server, key):
             return redirect(url_for("admin_property_edit", server=server, key=key))
         drop_at = None
     else:
-        drop_at = get_drop_at(new_server, insured)
+        drop_at = get_drop_at(new_server, prop_type, insured)
         expiry_ts = calc_expiry_from_pdl(pd, d_val, drop_at)
 
     updated = dict(old)
@@ -1662,30 +1687,34 @@ def admin_settings():
     for s in SERVER_ORDER:
         if s not in VALID_SERVERS:
             continue
-        insured_val   = get_drop_at_cached(dropat_cfg, s, True)
-        uninsured_val = get_drop_at_cached(dropat_cfg, s, False)
+        h_ins = get_drop_at_cached(dropat_cfg, s, "house", True)
+        h_uni = get_drop_at_cached(dropat_cfg, s, "house", False)
+        b_ins = get_drop_at_cached(dropat_cfg, s, "business", True)
+        b_uni = get_drop_at_cached(dropat_cfg, s, "business", False)
         rows += f"""<tr>
           <td>{s}</td>
-          <td><input type="number" name="insured_{s}" value="{insured_val}" min="0" max="10" style="width:80px"></td>
-          <td><input type="number" name="uninsured_{s}" value="{uninsured_val}" min="0" max="10" style="width:80px"></td>
+          <td><input type="number" name="house_insured_{s}" value="{h_ins}" min="0" max="10" style="width:70px"></td>
+          <td><input type="number" name="house_uninsured_{s}" value="{h_uni}" min="0" max="10" style="width:70px"></td>
+          <td><input type="number" name="business_insured_{s}" value="{b_ins}" min="0" max="10" style="width:70px"></td>
+          <td><input type="number" name="business_uninsured_{s}" value="{b_uni}" min="0" max="10" style="width:70px"></td>
         </tr>"""
     body = f"""
     <h1>Настройки</h1>
     <div class="card">
       <p style="color:var(--muted);margin-top:0">
-        Порог (L) — значение PayDay, при достижении которого дом считается слетевшим. Свой порог задаётся отдельно
-        для застрахованных домов (теряют 1 PD в час) и незастрахованных (теряют 2 PD в час) на каждом сервере.
-        Используется для автоматического расчёта времени слёта при добавлении/редактировании записи.
+        Порог (L) — значение PayDay, при достижении которого объект считается слетевшим. Задаётся отдельно для
+        домов и бизнесов, и отдельно для застрахованных (теряют 1 PD в час) и незастрахованных (теряют 2 PD в час)
+        на каждом сервере. Используется для автоматического расчёта времени слёта.
       </p>
       <form method="post" action="{url_for('admin_settings_save')}">
         <table>
-          <tr><th>Сервер</th><th>🛡 Порог (страхованный)</th><th>🚫 Порог (нестрахованный)</th></tr>
+          <tr><th>Сервер</th><th>🏠🛡 Дом застрах.</th><th>🏠🚫 Дом не застрах.</th><th>🏢🛡 Бизнес застрах.</th><th>🏢🚫 Бизнес не застрах.</th></tr>
           {rows}
         </table>
         <div style="margin-top:14px"><button type="submit">Сохранить</button></div>
       </form>
     </div>"""
-    return render_page("Настройки", "settings", body)
+    return render_page("Настройки", "settings", body + _render_exceptions_section())
 
 @app.route("/admin/settings/save", methods=["POST"])
 @admin_only
@@ -1694,17 +1723,98 @@ def admin_settings_save():
     for s in SERVER_ORDER:
         if s not in VALID_SERVERS:
             continue
-        for form_key, db_key in (("insured_", "insured"), ("uninsured_", "uninsured")):
-            raw = request.form.get(f"{form_key}{s}", "").strip()
+        for form_prefix, prop_type, insured_key in (
+            ("house_insured_", "house", "insured"),
+            ("house_uninsured_", "house", "uninsured"),
+            ("business_insured_", "business", "insured"),
+            ("business_uninsured_", "business", "uninsured"),
+        ):
+            raw = request.form.get(f"{form_prefix}{s}", "").strip()
             if raw == "":
                 continue
             try:
                 val = int(raw)
             except ValueError:
                 continue
-            set_drop_at(s, db_key, val)
+            set_drop_at(s, prop_type, insured_key, val)
             updated += 1
     flash_msg("ok", f"Настройки сохранены ({updated} значений)")
+    return redirect(url_for("admin_settings"))
+
+# ── Исключения: ID домов/бизнесов, которые никогда не попадают в слёты ──
+def _render_exceptions_section():
+    data = db.reference("exceptions").get() or {}
+    rows = ""
+    count = 0
+    for srv in sorted(data.keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999):
+        ids = data.get(srv)
+        if not isinstance(ids, dict):
+            continue
+        for pid in sorted(ids.keys()):
+            count += 1
+            rows += f"""<tr>
+              <td>{srv}</td>
+              <td>{pid}</td>
+              <td>
+                <form class="inline" method="post" action="{url_for('admin_exception_remove', server=srv, prop_id=pid)}">
+                  <button type="submit" class="danger">Убрать</button>
+                </form>
+              </td>
+            </tr>"""
+
+    server_options = "".join(
+        f'<option value="{s}">{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
+    )
+    return f"""
+    <div class="card">
+      <h2 style="margin-top:0">Исключения</h2>
+      <p style="color:var(--muted)">
+        ID домов/бизнесов, которые никогда не будут попадать в «Слёты» — ни сейчас, ни при последующих сканах.
+        Если ID уже был добавлен ранее, существующая запись будет удалена сразу.
+      </p>
+      <form method="post" action="{url_for('admin_exception_add')}" class="row" style="margin-bottom:14px">
+        <select name="server" required><option value="">Сервер</option>{server_options}</select>
+        <input type="text" name="prop_id" placeholder="ID (можно несколько через запятую)" required style="width:260px">
+        <button type="submit">Добавить</button>
+      </form>
+      <table>
+        <tr><th>Сервер</th><th>ID</th><th></th></tr>
+        {rows or f"<tr><td colspan='3'>Исключений пока нет</td></tr>"}
+      </table>
+    </div>
+    """
+
+@app.route("/admin/exceptions/add", methods=["POST"])
+@admin_only
+def admin_exception_add():
+    server = request.form.get("server", "")
+    raw_ids = request.form.get("prop_id", "")
+    if server not in VALID_SERVERS:
+        flash_msg("err", "Неверный сервер")
+        return redirect(url_for("admin_settings"))
+
+    ids = [x.strip() for x in raw_ids.split(",") if x.strip()]
+    if not ids:
+        flash_msg("err", "Укажите хотя бы один ID")
+        return redirect(url_for("admin_settings"))
+
+    now = int(time.time())
+    removed = 0
+    for pid in ids:
+        db.reference(f"exceptions/{server}/{pid}").set({"addedAt": now})
+        for prop_type in ("house", "business"):
+            key = f"{prop_type}_{pid}"
+            if db.reference(f"properties/{server}/{key}").get():
+                db.reference(f"properties/{server}/{key}").delete()
+                removed += 1
+    flash_msg("ok", f"Добавлено в исключения: {len(ids)}" + (f", удалено существующих записей: {removed}" if removed else ""))
+    return redirect(url_for("admin_settings"))
+
+@app.route("/admin/exceptions/<server>/<prop_id>/remove", methods=["POST"])
+@admin_only
+def admin_exception_remove(server, prop_id):
+    db.reference(f"exceptions/{server}/{prop_id}").delete()
+    flash_msg("ok", "Исключение убрано")
     return redirect(url_for("admin_settings"))
 
 # ── Редакторы (ограниченные аккаунты по серверам) ────────
@@ -1881,8 +1991,16 @@ def admin_autodetect():
             if not isinstance(v, dict):
                 continue
             count += 1
-            guess = v.get("guess", "")
-            guess_label = "🛡 Страхован" if guess == "insured" else ("🚫 Не страхован" if guess == "uninsured" else "—")
+            guess  = v.get("guess", "")
+            reason = v.get("reason", "ambiguous")
+            if reason == "too_fast":
+                guess_label = '<span class="pill bad">⚠️ PD упал больше 2/час — вероятно другой дом</span>'
+            elif guess == "insured":
+                guess_label = "🛡 Страхован"
+            elif guess == "uninsured":
+                guess_label = "🚫 Не страхован"
+            else:
+                guess_label = "—"
             created = format_msk(v.get("createdAt", 0), "%d.%m.%Y %H:%M")
             rows += f"""
             <tr>
@@ -1930,7 +2048,7 @@ def admin_autodetect_resolve(server, key):
     prop = db.reference(f"properties/{server}/{key}").get()
     if isinstance(prop, dict):
         d_val   = D_INSURED if insured else D_UNINSURED
-        drop_at = get_drop_at(server, insured)
+        drop_at = get_drop_at(server, prop.get("propType", "house"), insured)
         db.reference(f"properties/{server}/{key}").update({
             "insured": insured, "d": d_val, "dropAt": drop_at,
         })
@@ -2274,7 +2392,7 @@ def admin_realtor_set_insured(server, key):
     prop = db.reference(f"properties/{server}/{key}").get()
     if isinstance(prop, dict):
         d_val   = D_INSURED if insured else D_UNINSURED
-        drop_at = get_drop_at(server, insured)
+        drop_at = get_drop_at(server, prop.get("propType", "house"), insured)
         db.reference(f"properties/{server}/{key}").update({
             "insured": insured, "d": d_val, "dropAt": drop_at,
         })
