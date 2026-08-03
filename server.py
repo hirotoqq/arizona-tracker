@@ -251,6 +251,22 @@ def update():
         and v.get("expiryTs", 0) > now
     }
 
+    # "Скан" = часовое окно (15:00, 16:00...). Держим только последние 3
+    # таких окна — старые целиком удаляются. Если в каком-то окне
+    # просканировали не все сервера — в нём и останутся только они.
+    hour_bucket = (now // 3600) * 3600
+    sessions_index = db.reference("sessions_index").get() or []
+    if not isinstance(sessions_index, list):
+        sessions_index = []
+    if hour_bucket not in sessions_index:
+        sessions_index.append(hour_bucket)
+        sessions_index.sort()
+        while len(sessions_index) > 3:
+            old_bucket = sessions_index.pop(0)
+            db.reference(f"sessions/{old_bucket}").delete()
+        db.reference("sessions_index").set(sessions_index)
+    session_writes = {}
+
     autodetect_writes = {}
 
     written = 0
@@ -276,12 +292,12 @@ def update():
 
         # ------------------------------------------------------------
         # Автоопределение "застрахован / не застрахован": сравниваем новый
-        # скан с предыдущим сканом ТОГО ЖЕ дома — только когда есть propId.
-        # Для домов без ID позиция ненадёжна как идентификатор одного и того
-        # же дома между сканами (список может перестроиться), поэтому для
-        # них автоопределение не делаем — см. раздел "Риелторка".
+        # скан с предыдущим сканом ТОГО ЖЕ дома (по ID, либо по стабильной
+        # позиции — см. ключ выше). Если PD упал ровно на 1×часы —
+        # застрахован, ровно на 2×часы — не застрахован. Если неоднозначно —
+        # кладём в очередь на ручную проверку и НЕ трогаем текущий статус.
         # ------------------------------------------------------------
-        old_rec = existing.get(key) if prop_id else None
+        old_rec = existing.get(key)
         prev_insured = old_rec.get("insured") if isinstance(old_rec, dict) else None
         prev_insured = prev_insured if isinstance(prev_insured, bool) else None
 
@@ -343,12 +359,19 @@ def update():
         }
         written += 1
 
-        # Для домов без ID сохраняем каждый скан в историю (для "Риелторки") —
-        # у них нет автоопределения страховки, поэтому нужно копить лог
-        # PD во времени, чтобы можно было сравнить вручную любые два скана.
+        # Снимок для "Риелторки" → режим "Снэпшоты" (последние 3 часовых
+        # окна, все сервера разом — как раунд обхода серверов).
+        session_writes[key] = {
+            "propType": e["propType"], "pd": pd, "insured": insured,
+            "propId": prop_id, "pos": pos, "scanTs": now,
+        }
+
+        # Для "Риелторки" → режим "История": для домов без ID отдельно
+        # копим неограниченную (30 дней) историю сканов по каждой позиции —
+        # чтобы можно было сравнить любые два произвольных скана, а не только
+        # соседние часовые окна.
         if not prop_id:
             db.reference(f"history/{server}/{key}/{now}").set({"pd": pd})
-            # чистим записи старше 30 дней, чтобы история не росла бесконечно
             hist = db.reference(f"history/{server}/{key}").get() or {}
             if isinstance(hist, dict):
                 cutoff = now - HISTORY_RETENTION_SECONDS
@@ -360,6 +383,8 @@ def update():
                         continue
 
     ref.set(kept)
+    if session_writes:
+        db.reference(f"sessions/{hour_bucket}/{server}").update(session_writes)
     if autodetect_writes:
         for k, v in autodetect_writes.items():
             db.reference(f"autodetect/{server}/{k}").set(v)
@@ -1920,9 +1945,15 @@ def admin_autodetect_reject(server, key):
     flash_msg("ok", "Предложение отклонено")
     return redirect(url_for("admin_autodetect"))
 
-# ── Риелторка (история сканов домов без ID + ручное сравнение) ────
+# ── Риелторка: 2 режима — "Снэпшоты" (последние 3 часа-скана, все
+#   сервера сеткой, как раунд обхода) и "История" (для домов без ID —
+#   неограниченная история по позиции, сравнение любых 2 сканов) ─────
 REALTOR_JS = """
 <script>
+function toggleHistory(id) {
+  var el = document.getElementById(id);
+  el.style.display = (el.style.display === 'none') ? '' : 'none';
+}
 function compareRealtor(cardId) {
   var card = document.getElementById(cardId);
   var checked = Array.from(card.querySelectorAll('.hist-cb:checked'));
@@ -1940,7 +1971,7 @@ function compareRealtor(cardId) {
   var delta = older.pd - newer.pd;
   var text = 'Δ PD = ' + delta + ' за ' + elapsedHours + 'ч. ';
   if (elapsedHours < 1) {
-    text += 'Слишком мало времени между сканами — сравнение не покажет ничего внятного.';
+    text += 'Слишком мало времени между сканами.';
   } else if (delta <= 0) {
     text += 'PD не уменьшился — сравнение не показательно.';
   } else if (delta === elapsedHours * 1) {
@@ -1949,26 +1980,123 @@ function compareRealtor(cardId) {
     text += '→ похоже, НЕ ЗАСТРАХОВАН 🚫';
   } else {
     var closerInsured = Math.abs(delta - elapsedHours*1) <= Math.abs(delta - elapsedHours*2);
-    text += '— не совпадает ровно ни с 1, ни с 2 в час; на глаз ближе к ' + (closerInsured ? 'ЗАСТРАХОВАН 🛡' : 'НЕ ЗАСТРАХОВАН 🚫');
+    text += '— неточно; на глаз ближе к ' + (closerInsured ? 'ЗАСТРАХОВАН 🛡' : 'НЕ ЗАСТРАХОВАН 🚫');
   }
   resultEl.textContent = text;
   resultEl.style.color = 'var(--text)';
 }
-function toggleHistory(id) {
-  var el = document.getElementById(id);
-  el.style.display = (el.style.display === 'none') ? '' : 'none';
-}
 </script>
 """
 
-@app.route("/admin/realtor")
-@admin_only
-def admin_realtor():
-    srv_filter = request.args.get("server", "")
-    asof_str   = request.args.get("asof", "").strip()
-    from_str   = request.args.get("from", "").strip()
-    to_str     = request.args.get("to", "").strip()
+def _realtor_tabs(active_view):
+    snap_url = url_for('admin_realtor', view='snapshot')
+    hist_url = url_for('admin_realtor', view='history')
+    snap_cls = "" if active_view == "snapshot" else ' class="ghost"'
+    hist_cls = "" if active_view == "history" else ' class="ghost"'
+    return f"""
+    <div class="row" style="gap:8px;margin-bottom:14px">
+      <a href="{snap_url}"><button type="button"{snap_cls}>📸 Снэпшоты</button></a>
+      <a href="{hist_url}"><button type="button"{hist_cls}>📊 История</button></a>
+    </div>
+    """
 
+def _render_snapshot_mode(t_param):
+    sessions_index = db.reference("sessions_index").get() or []
+    if not isinstance(sessions_index, list):
+        sessions_index = []
+    try:
+        sessions_index = sorted({int(x) for x in sessions_index}, reverse=True)
+    except (ValueError, TypeError):
+        sessions_index = []
+
+    if not sessions_index:
+        return '<div class="card">Пока нет ни одного скана. Отсканируйте хотя бы один сервер ботом — раунд появится здесь.</div>'
+
+    selected_bucket = None
+    if t_param:
+        try:
+            t_int = int(t_param)
+            if t_int in sessions_index:
+                selected_bucket = t_int
+        except ValueError:
+            pass
+    if selected_bucket is None:
+        selected_bucket = sessions_index[0]
+
+    time_buttons = ""
+    for b in sessions_index:
+        label = format_msk(b, "%H:00 (%d.%m)")
+        active = (b == selected_bucket)
+        url = url_for('admin_realtor', view='snapshot', t=b)
+        cls = "" if active else ' class="ghost"'
+        time_buttons += f'<a href="{url}"><button type="button"{cls}>{label}</button></a> '
+
+    snap = db.reference(f"sessions/{selected_bucket}").get() or {}
+    cards = ""
+    if isinstance(snap, dict):
+        for srv in sorted(snap.keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999):
+            entries = snap.get(srv)
+            if not isinstance(entries, dict) or not entries:
+                continue
+
+            def _sort_key(item):
+                v = item[1]
+                pos = v.get("pos") if isinstance(v, dict) else None
+                return pos if isinstance(pos, (int, float)) else 9999
+
+            rows = ""
+            for key, v in sorted(entries.items(), key=_sort_key):
+                if not isinstance(v, dict):
+                    continue
+                icon = "🏠" if v.get("propType") == "house" else "🏢"
+                label = v.get("propId") or v.get("pos") or "—"
+                pd_val = v.get("pd", "?")
+                insured_flag = v.get("insured")
+                insured_pill = (
+                    '<span class="pill ok">🛡</span>' if insured_flag is True else
+                    '<span class="pill bad">🚫</span>' if insured_flag is False else ""
+                )
+                rows += f"""<tr>
+                  <td>{v.get('pos','—')}</td>
+                  <td>{icon} №{label}</td>
+                  <td><span class="pill bad">Слетит через: {pd_val} Payday</span></td>
+                  <td>{insured_pill}</td>
+                  <td class="row">
+                    <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                      <input type="hidden" name="view" value="snapshot">
+                      <input type="hidden" name="t" value="{selected_bucket}">
+                      <input type="hidden" name="insured" value="1">
+                      <button type="submit" class="ghost" title="Застрахован">🛡</button>
+                    </form>
+                    <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                      <input type="hidden" name="view" value="snapshot">
+                      <input type="hidden" name="t" value="{selected_bucket}">
+                      <input type="hidden" name="insured" value="0">
+                      <button type="submit" class="ghost" title="Не застрахован">🚫</button>
+                    </form>
+                  </td>
+                </tr>"""
+
+            cards += f"""
+            <div class="card">
+              <div style="font-weight:700;margin-bottom:8px">{server_label(srv)}</div>
+              <table>
+                <tr><th>№</th><th>Объект</th><th>Слёт</th><th></th><th></th></tr>
+                {rows}
+              </table>
+            </div>"""
+
+    return f"""
+    <div class="card" style="margin-bottom:14px">
+      <div style="color:var(--muted);font-size:13px;margin-bottom:8px">Раунд сканирования (доступны только часы, когда реально что-то сканировали):</div>
+      {time_buttons}
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">
+      {cards or "<div class='card'>Нет данных за этот час.</div>"}
+    </div>
+    """
+
+def _render_history_mode(srv_filter, asof_str, from_str, to_str):
     def parse_local_dt(s):
         if not s:
             return None
@@ -1992,15 +2120,14 @@ def admin_realtor():
         f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
     )
 
-    body = f"""
-    <h1>Риелторка</h1>
+    filter_card = f"""
     <div class="card">
       <p style="color:var(--muted);margin-top:0">
-        История сканов домов <b>без ID</b> по позициям — для страховки таких домов, которую бот не умеет определять
-        автоматически. Отметьте любые два скана в истории и нажмите «Сравнить», либо укажите «Момент времени»,
-        чтобы увидеть, каким PD был список на тот момент.
+        История сканов домов <b>без ID</b> по позициям (хранится 30 дней). Отметьте любые два скана и нажмите
+        «Сравнить», либо укажите «Момент времени», чтобы увидеть, каким PD был список на тот момент.
       </p>
       <form method="get" class="row" style="align-items:center">
+        <input type="hidden" name="view" value="history">
         <select name="server" onchange="this.form.requestSubmit()">
           <option value="">— выберите сервер —</option>{server_options}
         </select>
@@ -2019,7 +2146,7 @@ def admin_realtor():
     """
 
     if not srv_filter:
-        return render_page("Риелторка", "realtor", body + REALTOR_JS)
+        return filter_card
 
     history_data  = db.reference(f"history/{srv_filter}").get() or {}
     current_props = db.reference(f"properties/{srv_filter}").get() or {}
@@ -2089,10 +2216,14 @@ def admin_realtor():
           {asof_html}
           <div class="row" style="margin:8px 0">
             <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv_filter, key=key)}">
+              <input type="hidden" name="view" value="history">
+              <input type="hidden" name="server" value="{srv_filter}">
               <input type="hidden" name="insured" value="1">
               <button type="submit" class="ghost">🛡 Отметить застрахован</button>
             </form>
             <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv_filter, key=key)}">
+              <input type="hidden" name="view" value="history">
+              <input type="hidden" name="server" value="{srv_filter}">
               <input type="hidden" name="insured" value="0">
               <button type="submit" class="ghost">🚫 Отметить не застрахован</button>
             </form>
@@ -2114,7 +2245,28 @@ def admin_realtor():
     if positions_found == 0:
         cards = '<div class="card">Для этого сервера пока нет истории сканов домов без ID.</div>'
 
-    return render_page("Риелторка", "realtor", body + cards + REALTOR_JS)
+    return filter_card + cards
+
+@app.route("/admin/realtor")
+@admin_only
+def admin_realtor():
+    view = request.args.get("view", "snapshot")
+    if view not in ("snapshot", "history"):
+        view = "snapshot"
+
+    tabs = _realtor_tabs(view)
+
+    if view == "snapshot":
+        content = _render_snapshot_mode(request.args.get("t", ""))
+    else:
+        content = _render_history_mode(
+            request.args.get("server", ""),
+            request.args.get("asof", "").strip(),
+            request.args.get("from", "").strip(),
+            request.args.get("to", "").strip(),
+        )
+
+    return render_page("Риелторка", "realtor", f"<h1>Риелторка</h1>{tabs}{content}{REALTOR_JS}")
 
 @app.route("/admin/realtor/<server>/<key>/set-insured", methods=["POST"])
 @admin_only
@@ -2130,7 +2282,14 @@ def admin_realtor_set_insured(server, key):
         flash_msg("ok", "Статус страховки обновлён")
     else:
         flash_msg("err", "Запись уже не активна (истекла) — статус не изменён")
-    return redirect(url_for("admin_realtor", server=server))
+
+    view = request.form.get("view", "snapshot")
+    if view == "history":
+        return redirect(url_for("admin_realtor", view="history", server=request.form.get("server", server)))
+    t = request.form.get("t", "")
+    return redirect(url_for("admin_realtor", view="snapshot", t=t))
+
+
 
 @app.route("/admin/broadcast")
 @admin_only
