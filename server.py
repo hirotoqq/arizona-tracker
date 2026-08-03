@@ -2055,27 +2055,23 @@ def _render_snapshot_mode(t_param):
                 label = v.get("propId") or v.get("pos") or "—"
                 pd_val = v.get("pd", "?")
                 insured_flag = v.get("insured")
-                insured_pill = (
-                    '<span class="pill ok">🛡</span>' if insured_flag is True else
-                    '<span class="pill bad">🚫</span>' if insured_flag is False else ""
-                )
+                shield_on   = "background:var(--accent);color:#0d0f14;border-color:var(--accent)" if insured_flag is True  else ""
+                noentry_on  = "background:var(--danger);color:#0d0f14;border-color:var(--danger)" if insured_flag is False else ""
                 rows += f"""<tr>
-                  <td>{v.get('pos','—')}</td>
-                  <td>{icon} №{label}</td>
-                  <td><span class="pill bad" style="font-size:11px;padding:2px 7px;white-space:nowrap">{pd_val} PD</span></td>
-                  <td>{insured_pill}</td>
-                  <td class="row" style="gap:2px">
+                  <td style="padding:4px 3px;white-space:nowrap">{v.get('pos','—')}. {icon} №{label}</td>
+                  <td style="padding:4px 3px;white-space:nowrap"><span class="pill bad" style="font-size:10px;padding:1px 6px">{pd_val} PD</span></td>
+                  <td style="padding:4px 3px;white-space:nowrap;text-align:right">
                     <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
                       <input type="hidden" name="view" value="snapshot">
                       <input type="hidden" name="t" value="{selected_bucket}">
                       <input type="hidden" name="insured" value="1">
-                      <button type="submit" class="ghost" title="Застрахован" style="padding:3px 7px;font-size:11px">🛡</button>
+                      <button type="submit" class="ghost" title="Застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{shield_on}">🛡</button>
                     </form>
                     <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
                       <input type="hidden" name="view" value="snapshot">
                       <input type="hidden" name="t" value="{selected_bucket}">
                       <input type="hidden" name="insured" value="0">
-                      <button type="submit" class="ghost" title="Не застрахован" style="padding:3px 7px;font-size:11px">🚫</button>
+                      <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
                     </form>
                   </td>
                 </tr>"""
@@ -2083,8 +2079,8 @@ def _render_snapshot_mode(t_param):
             cards += f"""
             <div class="card" style="padding:10px 12px;font-size:12px">
               <div style="font-weight:700;margin-bottom:6px;font-size:13px">{server_label(srv)}</div>
-              <table style="font-size:12px">
-                <tr><th style="padding:4px 6px">№</th><th style="padding:4px 6px">Объект</th><th style="padding:4px 6px">Слёт</th><th style="padding:4px 6px"></th><th style="padding:4px 6px"></th></tr>
+              <table style="font-size:12px;table-layout:fixed">
+                <tr><th style="padding:3px">Объект</th><th style="padding:3px">Слёт</th><th style="padding:3px"></th></tr>
                 {rows}
               </table>
             </div>"""
@@ -2094,7 +2090,7 @@ def _render_snapshot_mode(t_param):
       <div style="color:var(--muted);font-size:13px;margin-bottom:8px">Раунд сканирования (доступны только часы, когда реально что-то сканировали):</div>
       {time_buttons}
     </div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;align-items:start">
       {cards or "<div class='card'>Нет данных за этот час.</div>"}
     </div>
     """
