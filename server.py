@@ -147,13 +147,21 @@ def infer_insured(v):
 
 def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
     """PD на текущий момент: убывает на d_val за каждый прошедший час с
-    момента скана, но не ниже порога слёта (drop_at)."""
+    момента скана, но не ниже порога слёта (drop_at). Час рестарта сервера
+    (05:00–06:00 МСК) не считается — в это время PD не падает."""
     if now is None:
         now = int(time.time())
     floor_val = drop_at if drop_at is not None else 0
     if not scan_ts:
         return max(pd, floor_val)
-    elapsed_hours = max(0, (now - int(scan_ts)) // 3600)
+    scan_ts = int(scan_ts)
+    elapsed_hours = 0
+    ts = scan_ts
+    while ts + 3600 <= now:
+        ts += 3600
+        hour_msk = (ts + MSK_OFFSET) // 3600 % 24
+        if hour_msk != 5:
+            elapsed_hours += 1
     current = pd - d_val * elapsed_hours
     return max(current, floor_val)
 
@@ -175,6 +183,11 @@ def calc_expiry_from_pdl(pd, d, l, now=None):
     future_utc  = now + hours_left * 3600
     future_msk  = future_utc + MSK_OFFSET
     future_msk -= future_msk % 3600
+    # В 05:00 МСК сервер уходит на рестарт — слёт в этот час не происходит,
+    # реально падает только в 06:00.
+    hour_of_day = (future_msk // 3600) % 24
+    if hour_of_day == 5:
+        future_msk += 3600
     return future_msk - MSK_OFFSET
 
 KEY_ALPHABET  = string.ascii_uppercase + string.digits
@@ -676,7 +689,7 @@ NAV_SCRIPT = """
 
 def render_page(title, active, body):
     if current_role() == "editor":
-        nav_items = [("properties", "Слёты"), ("expired", "Истёкшие")]
+        nav_items = [("properties", "Слёты"), ("expired", "Истёкшие"), ("autodetect", "Автоопределения"), ("realtor", "Риелторка")]
     else:
         nav_items = [
             ("dashboard", "Дашборд"), ("keys", "Ключи"), ("users", "Пользователи"),
@@ -819,14 +832,78 @@ def admin_keys():
             f"<td>{status}</td><td>{used_by}</td><td>{created}</td><td>{revoke_btn}</td></tr>"
         )
 
+    now = int(time.time())
+    uq = request.args.get("uq", "").strip().lower()
+    users_data = db.reference("users").get() or {}
+    subs_data  = db.reference("subscriptions").get() or {}
+    all_ids = set(users_data.keys()) | set(subs_data.keys())
+    access_rows = ""
+    shown = 0
+    for uid in sorted(all_ids, key=lambda x: str(x)):
+        u   = users_data.get(uid, {}) if isinstance(users_data.get(uid), dict) else {}
+        sub = subs_data.get(uid, {}) if isinstance(subs_data.get(uid), dict) else {}
+        uname = u.get("username", "")
+        name  = u.get("name", "")
+        if uq and uq not in str(uid) and uq not in uname.lower() and uq not in name.lower():
+            continue
+        # без запроса показываем только тех, у кого вообще есть/был доступ — иначе список из всех пользователей бота
+        if not uq and uid not in subs_data:
+            continue
+        shown += 1
+
+        exp = sub.get("expires_at")
+        if exp and exp > now:
+            access = f'<span class="pill ok">до {format_msk(exp, "%d.%m.%Y %H:%M")}</span>'
+        elif exp:
+            access = '<span class="pill bad">истёк</span>'
+        else:
+            access = '<span class="pill muted">нет</span>'
+
+        uname_clean = uname.lstrip("@")
+        uname_html = f'<a href="https://t.me/{uname_clean}" target="_blank" style="color:var(--accent)">{uname}</a>' if uname_clean else '<span style="color:var(--muted)">—</span>'
+
+        access_rows += f"""<tr>
+          <td class="mono" style="max-width:110px;overflow-wrap:break-word">{uid}</td>
+          <td style="max-width:140px;overflow-wrap:break-word">{uname_html}</td>
+          <td>{access}</td>
+          <td>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;max-width:260px">
+              <form class="inline" method="post" action="{url_for('admin_user_extend', uid=uid)}" style="display:flex;gap:3px">
+                <input type="number" name="days" min="1" placeholder="дн" style="width:50px;padding:4px 6px;font-size:12px">
+                <button type="submit" class="ghost" style="padding:4px 7px;font-size:12px;white-space:nowrap">Продлить</button>
+              </form>
+              <form class="inline" method="post" action="{url_for('admin_user_reduce', uid=uid)}" style="display:flex;gap:3px">
+                <input type="number" name="days" min="1" placeholder="дн" style="width:50px;padding:4px 6px;font-size:12px">
+                <button type="submit" class="ghost" style="padding:4px 7px;font-size:12px;white-space:nowrap">Уменьшить</button>
+              </form>
+              <form class="inline" method="post" action="{url_for('admin_user_revoke', uid=uid)}" onsubmit="return confirm('Забрать доступ у {uid}?')">
+                <button type="submit" class="danger" style="padding:4px 7px;font-size:12px;white-space:nowrap">Забрать</button>
+              </form>
+            </div>
+          </td>
+        </tr>"""
+
     body = f"""
     <h1>Ключи доступа</h1>
     <div class="card">
+      <h2 style="margin-top:0">Сгенерировать ключи</h2>
       <form method="post" action="{url_for('admin_key_generate')}" class="row">
         <input type="number" name="days" placeholder="Дней" min="1" required style="width:100px">
         <input type="number" name="count" placeholder="Количество" min="1" max="50" value="1" style="width:130px">
         <button type="submit">Сгенерировать</button>
       </form>
+    </div>
+    <div class="card">
+      <h2 style="margin-top:0">Доступ пользователей</h2>
+      <p style="color:var(--muted);margin-top:0;font-size:13px">Продлить, уменьшить или полностью забрать доступ у конкретного пользователя.</p>
+      <form method="get" class="row" style="margin-bottom:12px">
+        <input type="text" name="uq" placeholder="Поиск по ID / нику / имени" value="{uq}">
+        <button type="submit">Найти</button>
+      </form>
+      <table>
+        <tr><th>ID</th><th>Ник</th><th>Доступ</th><th>Действия</th></tr>
+        {access_rows or "<tr><td colspan='4'>Никого не найдено</td></tr>"}
+      </table>
     </div>
     <table>
       <tr><th>Ключ</th><th>Срок</th><th>Статус</th><th>Активировал</th><th>Создан</th><th></th></tr>
@@ -908,28 +985,31 @@ def admin_users():
             f'<input type="hidden" name="reason" value="через админку">'
             f'<button class="danger" type="submit">Забанить</button></form>'
         )
+
+        uname_clean = uname.lstrip("@")
+        uname_html = f'<a href="https://t.me/{uname_clean}" target="_blank" style="color:var(--accent)">{uname}</a>' if uname_clean else '<span style="color:var(--muted)">—</span>'
+
         rows += f"""<tr>
-          <td class='mono'>{uid}</td><td>{uname}</td><td>{name}</td>
-          <td>{access} {ban_pill}</td>
-          <td>{u.get('last_seen','—')}</td>
-          <td class="row">
-            <form class="inline" method="post" action="{url_for('admin_user_extend', uid=uid)}">
-              <input type="number" name="days" placeholder="дней" min="1" style="width:70px">
-              <button type="submit">+</button>
-            </form>
-            {ban_btn}
-          </td>
+          <td class='mono' style="max-width:110px;overflow-wrap:break-word">{uid}</td>
+          <td style="max-width:140px;overflow-wrap:break-word">{uname_html}</td>
+          <td style="max-width:160px;overflow-wrap:break-word">{name}</td>
+          <td style="white-space:nowrap">{access} {ban_pill}</td>
+          <td style="white-space:nowrap">{u.get('last_seen','—')}</td>
+          <td>{ban_btn}</td>
         </tr>"""
 
     body = f"""
     <h1>Пользователи</h1>
     <div class="card">
+      <p style="color:var(--muted);margin-top:0;font-size:13px">
+        Продление / уменьшение / отзыв доступа — во вкладке «Ключи».
+      </p>
       <form method="get" class="row">
         <input type="text" name="q" placeholder="Поиск по ID / нику / имени" value="{q}">
         <button type="submit">Найти</button>
       </form>
     </div>
-    <table>
+    <table style="table-layout:fixed">
       <tr><th>ID</th><th>Ник</th><th>Имя</th><th>Доступ</th><th>Был(а)</th><th>Действия</th></tr>
       {rows or "<tr><td colspan='6'>Никого не найдено</td></tr>"}
     </table>"""
@@ -944,7 +1024,7 @@ def admin_user_extend(uid):
         days = 0
     if days <= 0:
         flash_msg("err", "Укажи число дней больше нуля")
-        return redirect(url_for("admin_users"))
+        return redirect(url_for("admin_keys"))
 
     now     = int(time.time())
     sub     = db.reference(f"subscriptions/{uid}").get() or {}
@@ -956,7 +1036,41 @@ def admin_user_extend(uid):
     })
     tg_send(int(uid), f"⏳ Твой доступ продлён администратором до {format_msk(expires_at, '%d.%m.%Y %H:%M')} МСК.")
     flash_msg("ok", f"Доступ для {uid} продлён на {days} дн.")
-    return redirect(url_for("admin_users"))
+    return redirect(url_for("admin_keys"))
+
+@app.route("/admin/users/<uid>/reduce", methods=["POST"])
+@admin_only
+def admin_user_reduce(uid):
+    try:
+        days = int(request.form.get("days", 0))
+    except ValueError:
+        days = 0
+    if days <= 0:
+        flash_msg("err", "Укажи число дней больше нуля")
+        return redirect(url_for("admin_keys"))
+
+    now = int(time.time())
+    sub = db.reference(f"subscriptions/{uid}").get() or {}
+    current = sub.get("expires_at", 0) if isinstance(sub, dict) else 0
+    new_expiry = current - days * 86400
+
+    if new_expiry <= now:
+        db.reference(f"subscriptions/{uid}").delete()
+        tg_send(int(uid), "⛔️ Твой доступ к боту был отозван администратором.")
+        flash_msg("ok", f"Доступ для {uid} уменьшен и полностью истёк")
+    else:
+        db.reference(f"subscriptions/{uid}").update({"expires_at": new_expiry})
+        tg_send(int(uid), f"⏳ Твой доступ уменьшен администратором. Действует до {format_msk(new_expiry, '%d.%m.%Y %H:%M')} МСК.")
+        flash_msg("ok", f"Доступ для {uid} уменьшен на {days} дн.")
+    return redirect(url_for("admin_keys"))
+
+@app.route("/admin/users/<uid>/revoke", methods=["POST"])
+@admin_only
+def admin_user_revoke(uid):
+    db.reference(f"subscriptions/{uid}").delete()
+    tg_send(int(uid), "⛔️ Твой доступ к боту был отозван администратором.")
+    flash_msg("ok", f"Доступ для {uid} отозван")
+    return redirect(url_for("admin_keys"))
 
 @app.route("/admin/users/<uid>/ban", methods=["POST"])
 @admin_only
@@ -1683,6 +1797,9 @@ def admin_property_update(server, key):
 @admin_only
 def admin_settings():
     dropat_cfg = db.reference("config/dropAt").get() or {}
+    sub_required = db.reference("config/subscriptionRequired").get()
+    sub_required = True if not isinstance(sub_required, bool) else sub_required
+
     rows = ""
     for s in SERVER_ORDER:
         if s not in VALID_SERVERS:
@@ -1701,6 +1818,20 @@ def admin_settings():
     body = f"""
     <h1>Настройки</h1>
     <div class="card">
+      <h2 style="margin-top:0">Доступ по подписке</h2>
+      <p style="color:var(--muted)">
+        Если включено — боту нужен активный ключ доступа (как сейчас). Если выключено — ботом сможет пользоваться
+        кто угодно без ключа.
+      </p>
+      <form method="post" action="{url_for('admin_settings_subscription')}" class="row" style="align-items:center">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:normal">
+          <input type="checkbox" name="required" {"checked" if sub_required else ""}>
+          Требовать подписку (ключ доступа)
+        </label>
+        <button type="submit">Сохранить</button>
+      </form>
+    </div>
+    <div class="card">
       <p style="color:var(--muted);margin-top:0">
         Порог (L) — значение PayDay, при достижении которого объект считается слетевшим. Задаётся отдельно для
         домов и бизнесов, и отдельно для застрахованных (теряют 1 PD в час) и незастрахованных (теряют 2 PD в час)
@@ -1715,6 +1846,14 @@ def admin_settings():
       </form>
     </div>"""
     return render_page("Настройки", "settings", body + _render_exceptions_section())
+
+@app.route("/admin/settings/subscription", methods=["POST"])
+@admin_only
+def admin_settings_subscription():
+    required = request.form.get("required") == "on"
+    db.reference("config/subscriptionRequired").set(required)
+    flash_msg("ok", "Доступ по подписке " + ("включён" if required else "выключен"))
+    return redirect(url_for("admin_settings"))
 
 @app.route("/admin/settings/save", methods=["POST"])
 @admin_only
@@ -1818,7 +1957,7 @@ def admin_exception_remove(server, prop_id):
     return redirect(url_for("admin_settings"))
 
 # ── Редакторы (ограниченные аккаунты по серверам) ────────
-def _server_checkboxes_html(name="servers", checked=None, id_prefix=""):
+def _server_checkboxes_html(name="servers", checked=None, id_prefix="", select_all=False):
     checked = checked or set()
     boxes = []
     for s in SERVER_ORDER:
@@ -1830,7 +1969,29 @@ def _server_checkboxes_html(name="servers", checked=None, id_prefix=""):
             f'<label for="{cid}" style="display:flex;align-items:center;gap:6px;font-size:13px;font-weight:normal;cursor:pointer">'
             f'<input type="checkbox" id="{cid}" name="{name}" value="{s}" {is_checked}> {s}</label>'
         )
-    return f'<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px">{"".join(boxes)}</div>'
+    container_id = f"{id_prefix}{name}_box".replace(" ", "_")
+    select_all_btn = ""
+    if select_all:
+        select_all_btn = (
+            f'<button type="button" class="ghost" style="margin-bottom:8px" '
+            f'onclick="toggleAllServers(\'{container_id}\')">Выбрать все / Снять все</button>'
+        )
+    return (
+        f'{select_all_btn}'
+        f'<div id="{container_id}" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px">{"".join(boxes)}</div>'
+    )
+
+SELECT_ALL_SERVERS_JS = """
+<script>
+function toggleAllServers(containerId) {
+  var box = document.getElementById(containerId);
+  if (!box) return;
+  var boxes = box.querySelectorAll('input[type=checkbox]');
+  var anyUnchecked = Array.from(boxes).some(function(cb){ return !cb.checked; });
+  boxes.forEach(function(cb){ cb.checked = anyUnchecked; });
+}
+</script>
+"""
 
 @app.route("/admin/editors")
 @admin_only
@@ -1898,7 +2059,7 @@ def admin_editors():
           <input type="text" name="password" placeholder="Пароль (мин. 4 символа)" required style="width:220px">
         </div>
         <div style="color:var(--muted);font-size:13px;margin-bottom:8px">Доступные сервера:</div>
-        {_server_checkboxes_html()}
+        {_server_checkboxes_html(select_all=True)}
         <div style="margin-top:14px"><button type="submit">Создать</button></div>
       </form>
     </div>
@@ -1906,7 +2067,7 @@ def admin_editors():
       <tr><th>Логин</th><th>Сервера</th><th>Статус</th><th>Создан</th><th></th></tr>
       {rows or "<tr><td colspan='5'>Редакторов пока нет</td></tr>"}
     </table>
-    {TOGGLE_EDIT_SCRIPT}"""
+    {TOGGLE_EDIT_SCRIPT}{SELECT_ALL_SERVERS_JS}"""
     return render_page("Редакторы", "editors", body)
 
 @app.route("/admin/editors/add", methods=["POST"])
@@ -1979,13 +2140,16 @@ def admin_editor_delete(eid):
 
 # ── Автоопределения страховки (спорные случаи на ручную проверку) ─
 @app.route("/admin/autodetect")
-@admin_only
+@login_required
 def admin_autodetect():
+    allowed = allowed_servers_for_current_user()
     data = db.reference("autodetect").get() or {}
     rows = ""
     count = 0
     for srv, entries in data.items():
         if not isinstance(entries, dict):
+            continue
+        if current_role() == "editor" and srv not in allowed:
             continue
         for key, v in entries.items():
             if not isinstance(v, dict):
@@ -2042,8 +2206,11 @@ def admin_autodetect():
     return render_page("Автоопределения", "autodetect", body)
 
 @app.route("/admin/autodetect/<server>/<key>/resolve", methods=["POST"])
-@admin_only
+@login_required
 def admin_autodetect_resolve(server, key):
+    if current_role() == "editor" and server not in allowed_servers_for_current_user():
+        flash_msg("err", "У вас нет доступа к этому серверу")
+        return redirect(url_for("admin_autodetect"))
     insured = request.form.get("insured") == "1"
     prop = db.reference(f"properties/{server}/{key}").get()
     if isinstance(prop, dict):
@@ -2057,8 +2224,11 @@ def admin_autodetect_resolve(server, key):
     return redirect(url_for("admin_autodetect"))
 
 @app.route("/admin/autodetect/<server>/<key>/reject", methods=["POST"])
-@admin_only
+@login_required
 def admin_autodetect_reject(server, key):
+    if current_role() == "editor" and server not in allowed_servers_for_current_user():
+        flash_msg("err", "У вас нет доступа к этому серверу")
+        return redirect(url_for("admin_autodetect"))
     db.reference(f"autodetect/{server}/{key}").delete()
     flash_msg("ok", "Предложение отклонено")
     return redirect(url_for("admin_autodetect"))
@@ -2066,45 +2236,7 @@ def admin_autodetect_reject(server, key):
 # ── Риелторка: 2 режима — "Снэпшоты" (последние 3 часа-скана, все
 #   сервера сеткой, как раунд обхода) и "История" (для домов без ID —
 #   неограниченная история по позиции, сравнение любых 2 сканов) ─────
-REALTOR_JS = """
-<script>
-function toggleHistory(id) {
-  var el = document.getElementById(id);
-  el.style.display = (el.style.display === 'none') ? '' : 'none';
-}
-function compareRealtor(cardId) {
-  var card = document.getElementById(cardId);
-  var checked = Array.from(card.querySelectorAll('.hist-cb:checked'));
-  var resultEl = document.getElementById(cardId + '-result');
-  if (checked.length !== 2) {
-    resultEl.textContent = 'Выберите ровно 2 скана для сравнения';
-    resultEl.style.color = 'var(--danger)';
-    return;
-  }
-  var a = {ts: parseInt(checked[0].dataset.ts), pd: parseInt(checked[0].dataset.pd)};
-  var b = {ts: parseInt(checked[1].dataset.ts), pd: parseInt(checked[1].dataset.pd)};
-  var older = a.ts < b.ts ? a : b;
-  var newer = a.ts < b.ts ? b : a;
-  var elapsedHours = Math.round((newer.ts - older.ts) / 3600);
-  var delta = older.pd - newer.pd;
-  var text = 'Δ PD = ' + delta + ' за ' + elapsedHours + 'ч. ';
-  if (elapsedHours < 1) {
-    text += 'Слишком мало времени между сканами.';
-  } else if (delta <= 0) {
-    text += 'PD не уменьшился — сравнение не показательно.';
-  } else if (delta === elapsedHours * 1) {
-    text += '→ похоже, ЗАСТРАХОВАН 🛡';
-  } else if (delta === elapsedHours * 2) {
-    text += '→ похоже, НЕ ЗАСТРАХОВАН 🚫';
-  } else {
-    var closerInsured = Math.abs(delta - elapsedHours*1) <= Math.abs(delta - elapsedHours*2);
-    text += '— неточно; на глаз ближе к ' + (closerInsured ? 'ЗАСТРАХОВАН 🛡' : 'НЕ ЗАСТРАХОВАН 🚫');
-  }
-  resultEl.textContent = text;
-  resultEl.style.color = 'var(--text)';
-}
-</script>
-"""
+REALTOR_JS = ""
 
 def _realtor_tabs(active_view):
     snap_url = url_for('admin_realtor', view='snapshot')
@@ -2118,7 +2250,7 @@ def _realtor_tabs(active_view):
     </div>
     """
 
-def _render_snapshot_mode(t_param):
+def _render_snapshot_mode(t_param, allowed=None):
     sessions_index = db.reference("sessions_index").get() or []
     if not isinstance(sessions_index, list):
         sessions_index = []
@@ -2153,6 +2285,8 @@ def _render_snapshot_mode(t_param):
     cards = ""
     if isinstance(snap, dict):
         for srv in sorted(snap.keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999):
+            if allowed is not None and srv not in allowed:
+                continue
             entries = snap.get(srv)
             if not isinstance(entries, dict) or not entries:
                 continue
@@ -2213,181 +2347,118 @@ def _render_snapshot_mode(t_param):
     </div>
     """
 
-def _render_history_mode(srv_filter, asof_str, from_str, to_str):
-    def parse_local_dt(s):
-        if not s:
-            return None
-        try:
-            dt = _dt.datetime.strptime(s, "%Y-%m-%dT%H:%M")
-            return int(dt.replace(tzinfo=MSK_TZ).timestamp())
-        except Exception:
-            try:
-                dt = _dt.datetime.strptime(s, "%Y-%m-%d")
-                return int(dt.replace(tzinfo=MSK_TZ).timestamp())
-            except Exception:
-                return None
+HISTORY_WINDOW_SECONDS = 24 * 3600
 
-    asof_ts = parse_local_dt(asof_str)
-    from_ts = parse_local_dt(from_str)
-    to_ts   = parse_local_dt(to_str)
-    if to_ts is not None:
-        to_ts += 24 * 3600  # включительно весь день "по"
-
-    server_options = "".join(
-        f'<option value="{s}" {"selected" if s == srv_filter else ""}>{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
-    )
-
-    filter_card = f"""
-    <div class="card">
-      <p style="color:var(--muted);margin-top:0">
-        История сканов домов <b>без ID</b> по позициям (хранится 30 дней). Отметьте любые два скана и нажмите
-        «Сравнить», либо укажите «Момент времени», чтобы увидеть, каким PD был список на тот момент.
-      </p>
-      <form method="get" class="row" style="align-items:center">
-        <input type="hidden" name="view" value="history">
-        <select name="server" onchange="this.form.requestSubmit()">
-          <option value="">— выберите сервер —</option>{server_options}
-        </select>
-        <label style="color:var(--muted);font-size:13px">Момент времени
-          <input type="datetime-local" name="asof" value="{asof_str}">
-        </label>
-        <label style="color:var(--muted);font-size:13px">С даты
-          <input type="date" name="from" value="{from_str}">
-        </label>
-        <label style="color:var(--muted);font-size:13px">По дату
-          <input type="date" name="to" value="{to_str}">
-        </label>
-        <button type="submit">Применить</button>
-      </form>
-    </div>
-    """
-
-    if not srv_filter:
-        return filter_card
-
-    history_data  = db.reference(f"history/{srv_filter}").get() or {}
-    current_props = db.reference(f"properties/{srv_filter}").get() or {}
+def _render_history_mode(allowed=None):
+    """Простая хронологическая история сканов домов без ID за последние 24ч —
+    в том же компактном стиле карточек, что и 'Снэпшоты'."""
+    now = int(time.time())
+    since = now - HISTORY_WINDOW_SECONDS
+    all_history = db.reference("history").get() or {}
 
     cards = ""
-    positions_found = 0
-    for key, entries in sorted(history_data.items()):
-        if not isinstance(entries, dict) or not entries:
-            continue
-        positions_found += 1
-
-        parts = key.split("_pos_")
-        prop_type_label = parts[0] if parts else "?"
-        pos_label        = parts[1] if len(parts) > 1 else "?"
-
-        points = []
-        for ts_str, v in entries.items():
-            try:
-                ts = int(ts_str)
-                pd_val = int(v.get("pd")) if isinstance(v, dict) else None
-            except (ValueError, TypeError):
+    if isinstance(all_history, dict):
+        for srv in sorted(all_history.keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999):
+            if allowed is not None and srv not in allowed:
                 continue
-            if pd_val is None:
+            positions = all_history.get(srv)
+            if not isinstance(positions, dict):
                 continue
-            points.append((ts, pd_val))
-        points.sort(key=lambda p: p[0], reverse=True)
 
-        filtered = [p for p in points if (from_ts is None or p[0] >= from_ts) and (to_ts is None or p[0] < to_ts)]
+            events = []  # (ts, key, pos_label, prop_type, pd)
+            for key, entries in positions.items():
+                if not isinstance(entries, dict):
+                    continue
+                parts = key.split("_pos_")
+                prop_type_label = parts[0] if parts else "?"
+                pos_label = parts[1] if len(parts) > 1 else "?"
+                for ts_str, v in entries.items():
+                    try:
+                        ts = int(ts_str)
+                        pd_val = int(v.get("pd")) if isinstance(v, dict) else None
+                    except (ValueError, TypeError):
+                        continue
+                    if pd_val is None or ts < since:
+                        continue
+                    events.append((ts, key, pos_label, prop_type_label, pd_val))
 
-        asof_point = None
-        if asof_ts is not None:
-            candidates = [p for p in points if p[0] <= asof_ts]
-            if candidates:
-                asof_point = max(candidates, key=lambda p: p[0])
+            if not events:
+                continue
+            events.sort(key=lambda e: e[0], reverse=True)
 
-        current = current_props.get(key) if isinstance(current_props, dict) else None
-        insured_now = infer_insured(current) if isinstance(current, dict) else None
-        status_pill = (
-            '<span class="pill ok">🛡 Страхован</span>' if insured_now is True else
-            '<span class="pill bad">🚫 Не страхован</span>' if insured_now is False else
-            '<span class="pill muted">нет данных</span>'
-        )
+            current_props = db.reference(f"properties/{srv}").get() or {}
 
-        asof_html = ""
-        if asof_ts is not None:
-            if asof_point:
-                asof_html = f'<div style="margin:8px 0;color:var(--muted)">На момент {asof_str.replace("T"," ")}: <b>{asof_point[1]} PD</b> (скан {format_msk(asof_point[0], "%d.%m.%Y %H:%M")})</div>'
-            else:
-                asof_html = '<div style="margin:8px 0;color:var(--muted)">На этот момент сканов ещё не было</div>'
+            rows = ""
+            for ts, key, pos_label, prop_type_label, pd_val in events:
+                icon = "🏠" if prop_type_label == "house" else "🏢"
+                current = current_props.get(key) if isinstance(current_props, dict) else None
+                insured_flag = infer_insured(current) if isinstance(current, dict) else None
+                shield_on  = "background:var(--accent);color:#0d0f14;border-color:var(--accent)" if insured_flag is True else ""
+                noentry_on = "background:var(--danger);color:#0d0f14;border-color:var(--danger)" if insured_flag is False else ""
+                rows += f"""<tr>
+                  <td style="padding:4px 3px;white-space:nowrap">{pos_label}. {icon} {format_msk(ts, "%d.%m %H:%M")}</td>
+                  <td style="padding:4px 3px;white-space:nowrap"><span class="pill bad" style="font-size:10px;padding:1px 6px">{pd_val} PD</span></td>
+                  <td style="padding:4px 3px;white-space:nowrap;text-align:right">
+                    <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                      <input type="hidden" name="view" value="history">
+                      <input type="hidden" name="insured" value="1">
+                      <button type="submit" class="ghost" title="Застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{shield_on}">🛡</button>
+                    </form>
+                    <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                      <input type="hidden" name="view" value="history">
+                      <input type="hidden" name="insured" value="0">
+                      <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
+                    </form>
+                  </td>
+                </tr>"""
 
-        card_id = f"card_{key}".replace(" ", "_")
-        rows_html = "".join(
-            f"""<tr>
-                <td><input type="checkbox" class="hist-cb" data-ts="{ts}" data-pd="{pdv}"></td>
-                <td>{format_msk(ts, "%d.%m.%Y %H:%M")}</td>
-                <td>{pdv}</td>
-            </tr>"""
-            for ts, pdv in filtered
-        )
+            cards += f"""
+            <div class="card" style="padding:10px 12px;font-size:12px">
+              <div style="font-weight:700;margin-bottom:6px;font-size:13px">{server_label(srv)} <span style="color:var(--muted);font-weight:normal">({len(events)})</span></div>
+              <table style="font-size:12px;table-layout:fixed">
+                <tr><th style="padding:3px">Скан</th><th style="padding:3px">PD</th><th style="padding:3px"></th></tr>
+                {rows}
+              </table>
+            </div>"""
 
-        cards += f"""
-        <div class="card" id="{card_id}">
-          <div class="row" style="justify-content:space-between;align-items:center">
-            <div><b>{prop_type_label}</b>, позиция {pos_label} <span style="color:var(--muted)">({len(filtered)} сканов{'' if from_ts is None and to_ts is None else ' в выбранном периоде'})</span></div>
-            {status_pill}
-          </div>
-          {asof_html}
-          <div class="row" style="margin:8px 0">
-            <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv_filter, key=key)}">
-              <input type="hidden" name="view" value="history">
-              <input type="hidden" name="server" value="{srv_filter}">
-              <input type="hidden" name="insured" value="1">
-              <button type="submit" class="ghost">🛡 Отметить застрахован</button>
-            </form>
-            <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv_filter, key=key)}">
-              <input type="hidden" name="view" value="history">
-              <input type="hidden" name="server" value="{srv_filter}">
-              <input type="hidden" name="insured" value="0">
-              <button type="submit" class="ghost">🚫 Отметить не застрахован</button>
-            </form>
-            <button type="button" class="ghost" onclick="toggleHistory('{card_id}_hist')">История ({len(filtered)})</button>
-          </div>
-          <div id="{card_id}_hist" style="display:none">
-            <table>
-              <tr><th style="width:36px"></th><th>Скан</th><th>PD</th></tr>
-              {rows_html or "<tr><td colspan='3'>Нет сканов за выбранный период</td></tr>"}
-            </table>
-            <div class="row" style="margin-top:8px;align-items:center">
-              <button type="button" onclick="compareRealtor('{card_id}')">Сравнить выбранные</button>
-              <span id="{card_id}-result" style="color:var(--muted)"></span>
-            </div>
-          </div>
-        </div>
-        """
-
-    if positions_found == 0:
-        cards = '<div class="card">Для этого сервера пока нет истории сканов домов без ID.</div>'
-
-    return filter_card + cards
+    intro = """
+    <div class="card" style="margin-bottom:14px">
+      <p style="color:var(--muted);margin:0">
+        История сканов домов <b>без ID</b> за последние 24 часа — хронологический лог по всем серверам.
+      </p>
+    </div>
+    """
+    grid = f"""
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;align-items:start">
+      {cards or "<div class='card'>За последние 24ч сканов не было.</div>"}
+    </div>
+    """
+    return intro + grid
 
 @app.route("/admin/realtor")
-@admin_only
+@login_required
 def admin_realtor():
     view = request.args.get("view", "snapshot")
     if view not in ("snapshot", "history"):
         view = "snapshot"
 
     tabs = _realtor_tabs(view)
+    allowed = allowed_servers_for_current_user() if current_role() == "editor" else None
 
     if view == "snapshot":
-        content = _render_snapshot_mode(request.args.get("t", ""))
+        content = _render_snapshot_mode(request.args.get("t", ""), allowed=allowed)
     else:
-        content = _render_history_mode(
-            request.args.get("server", ""),
-            request.args.get("asof", "").strip(),
-            request.args.get("from", "").strip(),
-            request.args.get("to", "").strip(),
-        )
+        content = _render_history_mode(allowed=allowed)
 
     return render_page("Риелторка", "realtor", f"<h1>Риелторка</h1>{tabs}{content}{REALTOR_JS}")
 
 @app.route("/admin/realtor/<server>/<key>/set-insured", methods=["POST"])
-@admin_only
+@login_required
 def admin_realtor_set_insured(server, key):
+    if current_role() == "editor" and server not in allowed_servers_for_current_user():
+        flash_msg("err", "У вас нет доступа к этому серверу")
+        return redirect(url_for("admin_realtor"))
+
     insured = request.form.get("insured") == "1"
     prop = db.reference(f"properties/{server}/{key}").get()
     if isinstance(prop, dict):
@@ -2402,11 +2473,9 @@ def admin_realtor_set_insured(server, key):
 
     view = request.form.get("view", "snapshot")
     if view == "history":
-        return redirect(url_for("admin_realtor", view="history", server=request.form.get("server", server)))
+        return redirect(url_for("admin_realtor", view="history"))
     t = request.form.get("t", "")
     return redirect(url_for("admin_realtor", view="snapshot", t=t))
-
-
 
 @app.route("/admin/broadcast")
 @admin_only

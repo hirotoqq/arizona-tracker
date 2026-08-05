@@ -33,6 +33,9 @@ KEY_ALPHABET      = string.ascii_uppercase + string.digits
 KEY_GROUP_LEN     = 4
 KEY_GROUPS        = 3
 EXPIRY_WARN_HOURS = 24  # за сколько часов до истечения подписки напоминать продлить
+FUNPAY_URL   = os.environ.get("FUNPAY_URL", "https://funpay.com/users/0000000/")  # TODO: подставь свою ссылку на FunPay
+PRICE_WEEK   = 60
+PRICE_MONTH  = 200
 
 SERVER_ORDER = [
     "Phoenix", "Tucson", "Scottdale", "Chandler", "Brainburg", "Saint-Rose",
@@ -114,8 +117,20 @@ def load_subscriptions():
             result[int(k)] = int(v["expires_at"])
     return result
 
+SUBSCRIPTION_REQUIRED_DEFAULT = True
+_subscription_required = SUBSCRIPTION_REQUIRED_DEFAULT  # кэш настройки с сайта (Настройки → По подписке)
+
+def load_subscription_required():
+    val = db.reference("config/subscriptionRequired").get()
+    return bool(val) if isinstance(val, bool) else SUBSCRIPTION_REQUIRED_DEFAULT
+
+def subscription_required():
+    return _subscription_required
+
 def is_authorized(chat_id):
     if int(chat_id) == ADMIN_ID:
+        return True
+    if not _subscription_required:
         return True
     exp = subscriptions.get(int(chat_id))
     return exp is not None and exp > int(time.time())
@@ -201,13 +216,20 @@ def save_user(chat_id, user=None):
 def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
     """PD на текущий момент: убывает на d_val за каждый прошедший час с
     момента скана (1/час для застрахованных, 2/час для незастрахованных),
-    но не ниже порога слёта (drop_at)."""
+    но не ниже порога слёта (drop_at). Час рестарта сервера (05:00–06:00
+    МСК) не считается — в это время PD не падает."""
     if now is None:
         now = int(time.time())
     floor_val = drop_at if drop_at is not None else 0
     if not scan_ts:
         return max(pd, floor_val)
-    elapsed_hours = max(0, (now - int(scan_ts)) // 3600)
+    scan_ts = int(scan_ts)
+    elapsed_hours = 0
+    ts = scan_ts
+    while ts + 3600 <= now:
+        ts += 3600
+        if datetime.fromtimestamp(ts, tz=MSK).hour != 5:
+            elapsed_hours += 1
     current = pd - d_val * elapsed_hours
     return max(current, floor_val)
 
@@ -297,6 +319,27 @@ def get_servers_ordered():
             ordered.append(s)
     return ordered
 
+def get_servers_summary():
+    """Один запрос к базе вместо N (по 2 на каждый сервер) — именно это
+    тормозило 'По серверу', так как раньше get_last_scan/get_server_counts
+    делали отдельный запрос в Firebase на каждый сервер в списке."""
+    now  = int(time.time())
+    data = db.reference("properties").get() or {}
+    summary = {}
+    for srv, entries in data.items():
+        if not isinstance(entries, dict):
+            continue
+        last_scan = 0
+        counts    = defaultdict(int)
+        for v in entries.values():
+            if not isinstance(v, dict):
+                continue
+            last_scan = max(last_scan, v.get("scanTs", 0))
+            if v.get("expiryTs", 0) > now:
+                counts[v.get("propType", "?")] += v.get("count", 1)
+        summary[srv] = {"last_scan": last_scan or None, "counts": counts}
+    return summary
+
 def get_last_scan(server):
     ref  = db.reference(f"properties/{server}")
     data = ref.get() or {}
@@ -353,7 +396,7 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
     # Заголовок — Markdown
     stats = []
     if house_total: stats.append(f"🏠×{house_total}")
-    if biz_total:   stats.append(f"🏢×{biz_total}")
+    if biz_total:   stats.append(f"⭐️🏢×{biz_total}⭐️")
     stats_str  = " ".join(stats) if stats else ""
     header     = f"*{title}*"
     if stats_str:
@@ -381,7 +424,7 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
             tree_lines.append(f"{srv_prefix}🌐 Сервер {srv.upper()}{season_str}")
 
             for pt, items in by_time[ts][srv].items():
-                pt_ru = "Дома" if pt == "house" else "Бизнесы"
+                pt_ru = "Дома" if pt == "house" else "⭐️ Бизнесы ⭐️"
                 ind   = "   │  " if not is_last_srv else "      "
                 tree_lines.append(f"{ind}└─📍 {pt_ru}:")
 
@@ -413,8 +456,7 @@ def permanent_keyboard():
         [KeyboardButton("🗺 По серверу"),    KeyboardButton("⭐️ Избранное")],
         [KeyboardButton("🔔 Уведомления"),   KeyboardButton("🎰 Лотерея")],
         [KeyboardButton("📜 История"),       KeyboardButton("🏆 Сезоны")],
-        [KeyboardButton("👤 Профиль"),       KeyboardButton("ℹ️ О боте")],
-        [KeyboardButton("📥 Скрипт")],
+        [KeyboardButton("👤 Профиль")],
     ], resize_keyboard=True, is_persistent=True)
 
 def _page_buttons(page, total, prefix):
@@ -427,28 +469,71 @@ def _page_buttons(page, total, prefix):
     return [row] if row else []
 
 # ── /start ────────────────────────────────────────────────
+FIRST_TIME_TEXT = (
+    "🏙 *Arizona Property Tracker*\n\n"
+    "*Как это работает:* игроки ставят Lua-скрипт в MoonLoader. При открытии диалога с имуществом "
+    "скрипт считывает данные и шлёт их на общий сервер. Бот получает эти данные и показывает "
+    "актуальные слёты всем пользователям.\n\n"
+    "📡 Чем больше игроков со скриптом — тем точнее данные.\n"
+    f"⚠️ Данные устаревают через {STALE_HOURS}ч без нового скана.\n"
+    "🕐 Всё время указано по МСК (UTC+3).\n\n"
+    "📥 Скрипт для установки прикреплён следующим сообщением.\n\n"
+    "👨‍💻 Разработчик: @hirotoqq"
+)
+
+def buy_key_keyboard():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("💳 Купить ключ", callback_data="buy_key")]])
+
+async def show_buy_key(update, ctx):
+    text = (
+        "💳 *Покупка доступа*\n\n"
+        f"🗓 Неделя — *{PRICE_WEEK}₽*\n"
+        f"📅 Месяц — *{PRICE_MONTH}₽*\n\n"
+        "Оформи заказ на FunPay — сразу после оплаты придёт ключ доступа.\n"
+        f"🔗 {FUNPAY_URL}\n\n"
+        "Когда получишь ключ, активируй его командой:\n"
+        "`/key ТВОЙ-КЛЮЧ`"
+    )
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, parse_mode="Markdown")
+    else:
+        await update.message.reply_text(text, parse_mode="Markdown")
+
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if is_banned(chat_id):
         await update.message.reply_text("⛔️ Вы заблокированы и не можете использовать этого бота.")
         return
+
+    is_first_time = db.reference(f"users/{chat_id}").get() is None
     all_users.add(chat_id)
     save_user(chat_id, update.effective_user)
 
     if not is_authorized(chat_id):
         await update.message.reply_text(
             "🔑 *Arizona Property Tracker*\n\n"
-            "Доступ к боту закрыт по ключу.\n"
-            "Пришли свой ключ доступа одним сообщением, например:\n"
-            "`AB12-CD34-EF56`",
-            parse_mode="Markdown"
+            "Доступ к боту закрыт по ключу.\n\n"
+            "Есть ключ? Активируй его командой:\n`/key ТВОЙ-КЛЮЧ`\n\n"
+            "Нет ключа — жми кнопку ниже, чтобы купить.",
+            parse_mode="Markdown", reply_markup=buy_key_keyboard()
         )
         return
 
+    if is_first_time:
+        await update.message.reply_text(FIRST_TIME_TEXT, parse_mode="Markdown")
+        if os.path.exists(SCRIPT_PATH):
+            try:
+                await update.message.reply_document(
+                    document=open(SCRIPT_PATH, "rb"),
+                    filename="property_tracker.luac",
+                    caption="📥 Положи файл в папку `moonloader` в GTA San Andreas.",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+
     text = (
         "🏙 *Arizona Property Tracker*\n\n"
-        "Добро пожаловать! Этот бот помогает отслеживать слёты домов и бизнесов "
-        "на всех серверах Arizona RP в реальном времени.\n\n"
         "📋 *Все слёты* — полный список актуальных слётов\n"
         "⚠️ *Ближайшие* — слёты в ближайшие 3 часа\n"
         "💥 *Массовый слёт* — серверы где падает 4+ объектов\n"
@@ -458,11 +543,34 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🏆 *Сезоны* — таблица сезонов на неделю\n"
         "🔔 *Уведомления* — настрой оповещения о слётах\n"
         "🎰 *Лотерея* — напоминание о билетах в 21:10 МСК\n"
-        "📜 *История* — слёты за последние 5 часов\n"
-        "📥 *Скрипт* — скачать Lua скрипт для сбора данных\n\n"
+        f"📜 *История* — слёты за последние {HISTORY_HOURS}ч\n\n"
         "👨‍💻 Разработчик: @hirotoqq"
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=permanent_keyboard())
+
+async def cmd_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    if is_banned(chat_id):
+        await update.message.reply_text("⛔️ Вы заблокированы и не можете использовать этого бота.")
+        return
+    all_users.add(chat_id)
+    save_user(chat_id, update.effective_user)
+
+    if not ctx.args:
+        await update.message.reply_text("Использование:\n`/key ТВОЙ-КЛЮЧ`", parse_mode="Markdown")
+        return
+
+    raw_key = " ".join(ctx.args)
+    expires_at, status = activate_key(chat_id, raw_key)
+    if status == "ok":
+        await update.message.reply_text(
+            f"✅ Ключ активирован!\nДоступ действует до: *{format_expiry(expires_at)}*",
+            parse_mode="Markdown", reply_markup=permanent_keyboard()
+        )
+    elif status == "used":
+        await update.message.reply_text("❌ Этот ключ уже был активирован.")
+    else:
+        await update.message.reply_text("❌ Неверный ключ. Проверь и попробуй ещё раз:\n`/key ТВОЙ-КЛЮЧ`", parse_mode="Markdown")
 
 async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_ID:
@@ -629,7 +737,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Этот ключ уже был активирован.")
         else:
             await update.message.reply_text(
-                "❌ Неверный ключ.\nПришли корректный ключ доступа одним сообщением."
+                "❌ Неверный ключ.\nПришли корректный ключ доступа или активируй командой `/key ТВОЙ-КЛЮЧ`.\n"
+                "Нет ключа — жми кнопку ниже, чтобы купить.",
+                parse_mode="Markdown", reply_markup=buy_key_keyboard()
             )
         return
     if t == "📋 Все слёты":          await show_list(update, ctx)
@@ -643,8 +753,6 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif t == "🎰 Лотерея":           await show_lottery_menu(update, ctx)
     elif t == "📜 История":           await show_history(update, ctx)
     elif t == "🏆 Сезоны":            await show_seasons(update, ctx)
-    elif t == "📥 Скрипт":            await show_script(update, ctx)
-    elif t == "ℹ️ О боте":            await show_about(update, ctx)
 
 # ── Показ списков ─────────────────────────────────────────
 async def show_list(update, ctx, page=0):
@@ -700,7 +808,8 @@ async def show_filter_menu(update, ctx):
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
 async def show_servers(update, ctx):
-    servers = get_servers_ordered()
+    summary = get_servers_summary()
+    servers = [s for s in SERVER_ORDER if s in summary] + [s for s in summary if s not in SERVER_ORDER]
     if not servers:
         txt = "Данных пока нет."
         if update.message: await update.message.reply_text(txt)
@@ -708,11 +817,12 @@ async def show_servers(update, ctx):
         return
     buttons, row = [], []
     for s in servers:
-        icon   = "🔴" if is_stale(get_last_scan(s)) else "🟢"
-        counts = get_server_counts(s)
+        info   = summary[s]
+        icon   = "🔴" if is_stale(info["last_scan"]) else "🟢"
+        counts = info["counts"]
         parts  = []
-        if counts["house"]:    parts.append(f"🏠×{counts['house']}")
-        if counts["business"]: parts.append(f"🏢×{counts['business']}")
+        if counts.get("house"):    parts.append(f"🏠×{counts['house']}")
+        if counts.get("business"): parts.append(f"🏢×{counts['business']}")
         cnt_str = " " + " ".join(parts) if parts else ""
         row.append(InlineKeyboardButton(f"{icon} {s}{cnt_str}", callback_data=f"srv_{s}"))
         if len(row) == 2:
@@ -865,56 +975,15 @@ async def show_lottery_menu(update, ctx):
     else:
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
 
-async def show_history(update, ctx):
+async def show_history(update, ctx, page=0):
     history = get_history()
-    if not history:
-        txt = f"📜 *История слётов*\n\nЗа последние {HISTORY_HOURS} часов слётов не было."
-        if update.message: await update.message.reply_text(txt, parse_mode="Markdown")
-        else: await update.callback_query.edit_message_text(txt, parse_mode="Markdown")
-        return
-    lines = [f"📜 *История слётов (последние {HISTORY_HOURS}ч)*\n"]
-    for v in history[:20]:
-        emoji = prop_emoji(v.get("propType", "?"))
-        lines.append(f"🔘 *{v.get('server','?')}* {emoji}\n    🕐 {format_time_msk(v.get('expiryTs', 0))} МСК")
-    text = "\n".join(lines)
+    header, block, total = build_list_text(history, f"📜 История слётов (последние {HISTORY_HOURS}ч)", page=page)
+    btns = _page_buttons(page, total, "hist")
+    kb   = InlineKeyboardMarkup(btns) if btns else None
     if update.message:
-        await update.message.reply_text(text, parse_mode="Markdown")
+        await update.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
     else:
-        await update.callback_query.edit_message_text(text, parse_mode="Markdown")
-
-async def show_script(update, ctx):
-    if not os.path.exists(SCRIPT_PATH):
-        await update.message.reply_text("❌ Файл скрипта не найден.")
-        return
-    await update.message.reply_document(
-        document=open(SCRIPT_PATH, "rb"),
-        filename="property_tracker.luac",
-        caption=(
-            "📥 *Lua скрипт для MoonLoader*\n\n"
-            "Положи файл в папку `moonloader` в GTA San Andreas.\n"
-            "Скрипт автоматически будет отправлять данные о слётах в общую базу.\n\n"
-            "👨‍💻 @hirotoqq"
-        ),
-        parse_mode="Markdown"
-    )
-
-async def show_about(update, ctx):
-    total_users = len(all_users)
-    await update.message.reply_text(
-        f"ℹ️ *О боте*\n\n"
-        f"*Arizona Property Tracker* — система мониторинга слётов имущества на серверах Arizona RP.\n\n"
-        f"⚙️ *Как это работает:*\n"
-        f"Игроки устанавливают Lua скрипт в MoonLoader. При открытии диалога с имуществом "
-        f"скрипт автоматически считывает данные и отправляет их на общий сервер. "
-        f"Бот получает эти данные и показывает актуальные слёты всем пользователям.\n\n"
-        f"📡 *Чем больше игроков со скриптом — тем точнее данные.*\n\n"
-        f"🕐 Время отображается по МСК (UTC+3)\n"
-        f"⚠️ Данные устаревают через {STALE_HOURS} часов без скана\n"
-        f"🔄 Обновление данных происходит в реальном времени\n\n"
-        f"👥 Пользователей: *{total_users}*\n\n"
-        f"👨‍💻 Разработчик: @hirotoqq",
-        parse_mode="Markdown"
-    )
+        await update.callback_query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
 
 # ── Callbacks ─────────────────────────────────────────────
 async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -925,6 +994,10 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer("⛔️ Вы заблокированы.", show_alert=True)
         return
     if not is_authorized(chat_id):
+        if query.data == "buy_key":
+            await query.answer()
+            await show_buy_key(update, ctx)
+            return
         await query.answer("🔑 Доступ закрыт. Пришли ключ доступа боту.", show_alert=True)
         return
 
@@ -939,6 +1012,8 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_soon(update, ctx)
     elif data.startswith("mass_page_"):
         await show_mass_drop(update, ctx, page=int(data.split("_")[-1]))
+    elif data.startswith("hist_page_"):
+        await show_history(update, ctx, page=int(data.split("_")[-1]))
     elif data.startswith("fav_page_"):
         await show_favorites(update, ctx, page=int(data.split("_")[-1]))
     elif data == "action_servers":
@@ -1223,18 +1298,35 @@ async def cleanup_history():
         data  = ref.get() or {}
         for k, v in data.items():
             if isinstance(v, dict) and v.get("expiryTs", 0) < since:
-                ref.child(k).delete()
+                db.reference(f"history/{k}").delete()
+
+async def sync_loop():
+    """Периодически подтягивает из базы то, что мог поменять админ через
+    сайт (продление/уменьшение/отзыв доступа, бан, переключатель 'По
+    подписке') — без этого изменения на сайте применялись бы только после
+    перезапуска бота."""
+    global banned_users, subscriptions, _subscription_required
+    while True:
+        await asyncio.sleep(120)
+        try:
+            banned_users  = load_banned()
+            subscriptions = load_subscriptions()
+            _subscription_required = load_subscription_required()
+        except Exception:
+            pass
 
 # ── Запуск ───────────────────────────────────────────────
 def main():
-    global all_users, banned_users, subscriptions
+    global all_users, banned_users, subscriptions, _subscription_required
     all_users     = load_users()
     banned_users  = load_banned()
     subscriptions = load_subscriptions()
+    _subscription_required = load_subscription_required()
     print(f"Загружено пользователей: {len(all_users)}, активных ключей: {len(subscriptions)}")
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",     cmd_start))
+    app.add_handler(CommandHandler("key",       cmd_key))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -1246,6 +1338,7 @@ def main():
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    loop.create_task(sync_loop())
     loop.create_task(notify_loop(app))
     loop.create_task(lottery_loop(app))
     loop.create_task(season_notify_loop(app))
