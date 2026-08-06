@@ -286,8 +286,26 @@ def update():
         db.reference("sessions_index").set(sessions_index)
     session_writes = {}
 
-    autodetect_writes = {}
     excluded_ids = set(db.reference(f"exceptions/{server}").get(shallow=True) or {})
+
+    # Замороженные дома (Настройки → Замороженные дома): на некоторых
+    # серверах есть дома, у которых PD зафиксирован и никогда не падает.
+    # У них обычно нет отдельного ID, поэтому их нельзя исключить по ID —
+    # вместо этого задаётся "на сервере X застряло N домов с PD=Y", и мы
+    # пропускаем первые N встреченных домов с таким PD за скан, оставляя
+    # лишние (это реальные, не замороженные дома, просто оказавшиеся на
+    # том же PD в моменте).
+    frozen_rules = db.reference(f"config/frozenHouses/{server}").get() or {}
+    frozen_budget = {}
+    if isinstance(frozen_rules, dict):
+        for rule in frozen_rules.values():
+            if isinstance(rule, dict):
+                try:
+                    r_pd, r_count = int(rule.get("pd")), int(rule.get("count"))
+                except (TypeError, ValueError):
+                    continue
+                frozen_budget[r_pd] = frozen_budget.get(r_pd, 0) + r_count
+    frozen_consumed = {}
 
     written = 0
     for e in entries:
@@ -296,6 +314,12 @@ def update():
             continue
         if e.get("propType") not in ("house", "business"):
             continue
+
+        if e.get("propType") == "house" and pd in frozen_budget:
+            consumed = frozen_consumed.get(pd, 0)
+            if consumed < frozen_budget[pd]:
+                frozen_consumed[pd] = consumed + 1
+                continue  # замороженный дом — не добавляем
 
         prop_id = e.get("propId")
         pos     = e.get("pos")
@@ -342,30 +366,10 @@ def update():
                         detected_insured = True
                     elif delta == expected_uninsured:
                         detected_insured = False
-                    elif delta > expected_uninsured:
-                        # Физически невозможно: максимум 2 PD/час (незастрахованный).
-                        # Скорее всего это другой дом (переиспользованный ID/позиция)
-                        # или между сканами что-то пропущено — гадать не пытаемся.
-                        autodetect_writes[key] = {
-                            "server": server, "propType": e["propType"],
-                            "propId": prop_id, "pos": pos,
-                            "oldPd": int(old_pd), "newPd": pd,
-                            "elapsedHours": elapsed_hours, "delta": delta,
-                            "guess": None,
-                            "reason": "too_fast",
-                            "createdAt": now,
-                        }
-                    else:
-                        guess = True if abs(delta - expected_insured) <= abs(delta - expected_uninsured) else False
-                        autodetect_writes[key] = {
-                            "server": server, "propType": e["propType"],
-                            "propId": prop_id, "pos": pos,
-                            "oldPd": int(old_pd), "newPd": pd,
-                            "elapsedHours": elapsed_hours, "delta": delta,
-                            "guess": "insured" if guess else "uninsured",
-                            "reason": "ambiguous",
-                            "createdAt": now,
-                        }
+                    # Если дельта не совпадает ровно ни с одним из вариантов
+                    # (либо вообще физически невозможна, > 2 PD/час) — статус
+                    # не трогаем, ничего никуда не сохраняем на ручную проверку
+                    # (раздел "Автоопределения" убран).
 
         if client_insured is not None:
             insured = client_insured
@@ -423,9 +427,6 @@ def update():
     ref.set(kept)
     if session_writes:
         db.reference(f"sessions/{hour_bucket}/{server}").update(session_writes)
-    if autodetect_writes:
-        for k, v in autodetect_writes.items():
-            db.reference(f"autodetect/{server}/{k}").set(v)
     return jsonify({"ok": True, "written": written})
 
 @app.route("/list", methods=["GET"])
@@ -689,12 +690,12 @@ NAV_SCRIPT = """
 
 def render_page(title, active, body):
     if current_role() == "editor":
-        nav_items = [("properties", "Слёты"), ("expired", "Истёкшие"), ("autodetect", "Автоопределения"), ("realtor", "Риелторка")]
+        nav_items = [("properties", "Слёты"), ("expired", "Истёкшие"), ("realtor", "Риелторка")]
     else:
         nav_items = [
             ("dashboard", "Дашборд"), ("keys", "Ключи"), ("users", "Пользователи"),
             ("properties", "Слёты"), ("expired", "Истёкшие"), ("settings", "Настройки"),
-            ("editors", "Редакторы"), ("autodetect", "Автоопределения"), ("realtor", "Риелторка"), ("broadcast", "Рассылка"),
+            ("editors", "Редакторы"), ("realtor", "Риелторка"), ("broadcast", "Рассылка"),
         ]
     nav = "".join(
         f'<a href="{url_for("admin_"+ep)}" class="{"active" if active==ep else ""}">{label}</a>'
@@ -813,7 +814,21 @@ def admin_dashboard():
 @app.route("/admin/keys")
 @admin_only
 def admin_keys():
+    now  = int(time.time())
     data = db.reference("access_keys").get() or {}
+
+    # Автоочистка: если ключ был активирован и выданный им доступ уже
+    # полностью истёк — ключ больше не нужен, удаляем его из базы.
+    for key, v in list(data.items()):
+        if not isinstance(v, dict):
+            continue
+        if v.get("activated"):
+            activated_at = v.get("activated_at") or v.get("created_at", 0)
+            duration     = int(v.get("duration_days", 0)) * 86400
+            if activated_at + duration < now:
+                db.reference(f"access_keys/{key}").delete()
+                del data[key]
+
     rows = ""
     for key, v in sorted(data.items(), key=lambda kv: kv[1].get("created_at", 0) if isinstance(kv[1], dict) else 0, reverse=True):
         if not isinstance(v, dict):
@@ -822,66 +837,13 @@ def admin_keys():
         status    = '<span class="pill ok">использован</span>' if activated else '<span class="pill muted">свободен</span>'
         used_by   = v.get("activated_by", "—")
         created   = format_msk(v.get("created_at", 0), "%d.%m.%Y %H:%M")
-        revoke_btn = (
-            f'<form class="inline" method="post" action="{url_for("admin_key_revoke", key=key)}" '
-            f'onsubmit="return confirm(\'Удалить ключ {key}?\')">'
-            f'<button class="danger" type="submit">Удалить</button></form>'
-        ) if not activated else ""
         rows += (
             f"<tr><td class='mono'>{key}</td><td>{v.get('duration_days','?')} дн.</td>"
-            f"<td>{status}</td><td>{used_by}</td><td>{created}</td><td>{revoke_btn}</td></tr>"
+            f"<td>{status}</td><td>{used_by}</td><td>{created}</td>"
+            f"<td><form class='inline' method='post' action='{url_for('admin_key_revoke', key=key)}' "
+            f"onsubmit=\"return confirm('Удалить ключ {key}?')\">"
+            f"<button class='danger' type='submit'>Удалить</button></form></td></tr>"
         )
-
-    now = int(time.time())
-    uq = request.args.get("uq", "").strip().lower()
-    users_data = db.reference("users").get() or {}
-    subs_data  = db.reference("subscriptions").get() or {}
-    all_ids = set(users_data.keys()) | set(subs_data.keys())
-    access_rows = ""
-    shown = 0
-    for uid in sorted(all_ids, key=lambda x: str(x)):
-        u   = users_data.get(uid, {}) if isinstance(users_data.get(uid), dict) else {}
-        sub = subs_data.get(uid, {}) if isinstance(subs_data.get(uid), dict) else {}
-        uname = u.get("username", "")
-        name  = u.get("name", "")
-        if uq and uq not in str(uid) and uq not in uname.lower() and uq not in name.lower():
-            continue
-        # без запроса показываем только тех, у кого вообще есть/был доступ — иначе список из всех пользователей бота
-        if not uq and uid not in subs_data:
-            continue
-        shown += 1
-
-        exp = sub.get("expires_at")
-        if exp and exp > now:
-            access = f'<span class="pill ok">до {format_msk(exp, "%d.%m.%Y %H:%M")}</span>'
-        elif exp:
-            access = '<span class="pill bad">истёк</span>'
-        else:
-            access = '<span class="pill muted">нет</span>'
-
-        uname_clean = uname.lstrip("@")
-        uname_html = f'<a href="https://t.me/{uname_clean}" target="_blank" style="color:var(--accent)">{uname}</a>' if uname_clean else '<span style="color:var(--muted)">—</span>'
-
-        access_rows += f"""<tr>
-          <td class="mono" style="max-width:110px;overflow-wrap:break-word">{uid}</td>
-          <td style="max-width:140px;overflow-wrap:break-word">{uname_html}</td>
-          <td>{access}</td>
-          <td>
-            <div style="display:flex;flex-wrap:wrap;gap:4px;max-width:260px">
-              <form class="inline" method="post" action="{url_for('admin_user_extend', uid=uid)}" style="display:flex;gap:3px">
-                <input type="number" name="days" min="1" placeholder="дн" style="width:50px;padding:4px 6px;font-size:12px">
-                <button type="submit" class="ghost" style="padding:4px 7px;font-size:12px;white-space:nowrap">Продлить</button>
-              </form>
-              <form class="inline" method="post" action="{url_for('admin_user_reduce', uid=uid)}" style="display:flex;gap:3px">
-                <input type="number" name="days" min="1" placeholder="дн" style="width:50px;padding:4px 6px;font-size:12px">
-                <button type="submit" class="ghost" style="padding:4px 7px;font-size:12px;white-space:nowrap">Уменьшить</button>
-              </form>
-              <form class="inline" method="post" action="{url_for('admin_user_revoke', uid=uid)}" onsubmit="return confirm('Забрать доступ у {uid}?')">
-                <button type="submit" class="danger" style="padding:4px 7px;font-size:12px;white-space:nowrap">Забрать</button>
-              </form>
-            </div>
-          </td>
-        </tr>"""
 
     body = f"""
     <h1>Ключи доступа</h1>
@@ -893,18 +855,10 @@ def admin_keys():
         <button type="submit">Сгенерировать</button>
       </form>
     </div>
-    <div class="card">
-      <h2 style="margin-top:0">Доступ пользователей</h2>
-      <p style="color:var(--muted);margin-top:0;font-size:13px">Продлить, уменьшить или полностью забрать доступ у конкретного пользователя.</p>
-      <form method="get" class="row" style="margin-bottom:12px">
-        <input type="text" name="uq" placeholder="Поиск по ID / нику / имени" value="{uq}">
-        <button type="submit">Найти</button>
-      </form>
-      <table>
-        <tr><th>ID</th><th>Ник</th><th>Доступ</th><th>Действия</th></tr>
-        {access_rows or "<tr><td colspan='4'>Никого не найдено</td></tr>"}
-      </table>
-    </div>
+    <p style="color:var(--muted);font-size:13px">
+      Использованные ключи удаляются автоматически, как только выданный ими доступ истекает.
+      Управление доступом (продлить/уменьшить/забрать) — во вкладке «Пользователи».
+    </p>
     <table>
       <tr><th>Ключ</th><th>Срок</th><th>Статус</th><th>Активировал</th><th>Создан</th><th></th></tr>
       {rows or "<tr><td colspan='6'>Ключей пока нет</td></tr>"}
@@ -975,43 +929,59 @@ def admin_users():
         else:
             access = '<span class="pill muted">нет</span>'
 
+        key_used = sub.get("key") if isinstance(sub, dict) else None
+        key_html = f'<span class="mono" style="font-size:12px">{key_used}</span>' if key_used else '<span style="color:var(--muted)">—</span>'
+
         ban_pill = '<span class="pill bad">забанен</span>' if is_banned else ""
         ban_btn  = (
             f'<form class="inline" method="post" action="{url_for("admin_user_unban", uid=uid)}">'
-            f'<button class="ghost" type="submit">Разбанить</button></form>'
+            f'<button class="ghost" type="submit" style="padding:4px 7px;font-size:12px;white-space:nowrap">Разбанить</button></form>'
             if is_banned else
             f'<form class="inline" method="post" action="{url_for("admin_user_ban", uid=uid)}" '
             f'onsubmit="return prompt(\'Причина бана:\')!=null">'
             f'<input type="hidden" name="reason" value="через админку">'
-            f'<button class="danger" type="submit">Забанить</button></form>'
+            f'<button class="danger" type="submit" style="padding:4px 7px;font-size:12px;white-space:nowrap">Забанить</button></form>'
         )
 
         uname_clean = uname.lstrip("@")
         uname_html = f'<a href="https://t.me/{uname_clean}" target="_blank" style="color:var(--accent)">{uname}</a>' if uname_clean else '<span style="color:var(--muted)">—</span>'
 
         rows += f"""<tr>
-          <td class='mono' style="max-width:110px;overflow-wrap:break-word">{uid}</td>
-          <td style="max-width:140px;overflow-wrap:break-word">{uname_html}</td>
-          <td style="max-width:160px;overflow-wrap:break-word">{name}</td>
+          <td class='mono' style="max-width:100px;overflow-wrap:break-word">{uid}</td>
+          <td style="max-width:130px;overflow-wrap:break-word">{uname_html}</td>
+          <td style="max-width:140px;overflow-wrap:break-word">{name}</td>
+          <td style="max-width:120px;overflow-wrap:break-word">{key_html}</td>
           <td style="white-space:nowrap">{access} {ban_pill}</td>
           <td style="white-space:nowrap">{u.get('last_seen','—')}</td>
-          <td>{ban_btn}</td>
+          <td>
+            <div style="display:flex;flex-wrap:wrap;gap:4px;max-width:230px">
+              <form class="inline" method="post" action="{url_for('admin_user_extend', uid=uid)}" style="display:flex;gap:3px">
+                <input type="number" name="days" min="1" placeholder="дн" style="width:46px;padding:4px 5px;font-size:12px">
+                <button type="submit" class="ghost" style="padding:4px 6px;font-size:12px;white-space:nowrap">Продлить</button>
+              </form>
+              <form class="inline" method="post" action="{url_for('admin_user_reduce', uid=uid)}" style="display:flex;gap:3px">
+                <input type="number" name="days" min="1" placeholder="дн" style="width:46px;padding:4px 5px;font-size:12px">
+                <button type="submit" class="ghost" style="padding:4px 6px;font-size:12px;white-space:nowrap">Уменьшить</button>
+              </form>
+              <form class="inline" method="post" action="{url_for('admin_user_revoke', uid=uid)}" onsubmit="return confirm('Забрать доступ у {uid}?')">
+                <button type="submit" class="danger" style="padding:4px 6px;font-size:12px;white-space:nowrap">Забрать</button>
+              </form>
+              {ban_btn}
+            </div>
+          </td>
         </tr>"""
 
     body = f"""
     <h1>Пользователи</h1>
     <div class="card">
-      <p style="color:var(--muted);margin-top:0;font-size:13px">
-        Продление / уменьшение / отзыв доступа — во вкладке «Ключи».
-      </p>
       <form method="get" class="row">
         <input type="text" name="q" placeholder="Поиск по ID / нику / имени" value="{q}">
         <button type="submit">Найти</button>
       </form>
     </div>
     <table style="table-layout:fixed">
-      <tr><th>ID</th><th>Ник</th><th>Имя</th><th>Доступ</th><th>Был(а)</th><th>Действия</th></tr>
-      {rows or "<tr><td colspan='6'>Никого не найдено</td></tr>"}
+      <tr><th>ID</th><th>Ник</th><th>Имя</th><th>Ключ</th><th>Доступ</th><th>Был(а)</th><th>Действия</th></tr>
+      {rows or "<tr><td colspan='7'>Никого не найдено</td></tr>"}
     </table>"""
     return render_page("Пользователи", "users", body)
 
@@ -1845,7 +1815,7 @@ def admin_settings():
         <div style="margin-top:14px"><button type="submit">Сохранить</button></div>
       </form>
     </div>"""
-    return render_page("Настройки", "settings", body + _render_exceptions_section())
+    return render_page("Настройки", "settings", body + _render_frozen_section() + _render_exceptions_section())
 
 @app.route("/admin/settings/subscription", methods=["POST"])
 @admin_only
@@ -1878,6 +1848,82 @@ def admin_settings_save():
             set_drop_at(s, prop_type, insured_key, val)
             updated += 1
     flash_msg("ok", f"Настройки сохранены ({updated} значений)")
+    return redirect(url_for("admin_settings"))
+
+def _render_frozen_section():
+    data = db.reference("config/frozenHouses").get() or {}
+    rows = ""
+    count = 0
+    for srv in sorted(data.keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999):
+        rules = data.get(srv)
+        if not isinstance(rules, dict):
+            continue
+        for rule_id, rule in rules.items():
+            if not isinstance(rule, dict):
+                continue
+            count += 1
+            rows += f"""<tr>
+              <td>{srv}</td>
+              <td>{rule.get("count","?")}</td>
+              <td>{rule.get("pd","?")} PD</td>
+              <td>
+                <form class="inline" method="post" action="{url_for('admin_frozen_remove', server=srv, rule_id=rule_id)}">
+                  <button type="submit" class="danger">Убрать</button>
+                </form>
+              </td>
+            </tr>"""
+
+    server_options = "".join(
+        f'<option value="{s}">{server_label(s)}</option>' for s in SERVER_ORDER if s in VALID_SERVERS
+    )
+    return f"""
+    <div class="card">
+      <h2 style="margin-top:0">Замороженные дома</h2>
+      <p style="color:var(--muted)">
+        На некоторых серверах есть дома, у которых PD зафиксирован и не падает. Укажите сервер, сколько таких
+        домов и на каком PD они стоят — бот будет пропускать ровно столько домов с этим PD при каждом скане.
+        Если реальных (не замороженных) домов на этом же PD окажется больше — лишние всё равно попадут в слёты.
+      </p>
+      <form method="post" action="{url_for('admin_frozen_add')}" class="row" style="margin-bottom:14px">
+        <select name="server" required><option value="">Сервер</option>{server_options}</select>
+        <input type="number" name="count" placeholder="Кол-во домов" min="1" required style="width:140px">
+        <input type="number" name="pd" placeholder="PD" min="1" max="65" required style="width:100px">
+        <button type="submit">Добавить</button>
+      </form>
+      <table>
+        <tr><th>Сервер</th><th>Кол-во</th><th>PD</th><th></th></tr>
+        {rows or "<tr><td colspan='4'>Замороженных домов пока не задано</td></tr>"}
+      </table>
+    </div>
+    """
+
+@app.route("/admin/frozen/add", methods=["POST"])
+@admin_only
+def admin_frozen_add():
+    server = request.form.get("server", "")
+    if server not in VALID_SERVERS:
+        flash_msg("err", "Неверный сервер")
+        return redirect(url_for("admin_settings"))
+    try:
+        count = int(request.form.get("count", 0))
+        pd    = int(request.form.get("pd", 0))
+    except ValueError:
+        flash_msg("err", "Неверные значения")
+        return redirect(url_for("admin_settings"))
+    if count <= 0 or pd <= 0:
+        flash_msg("err", "Количество и PD должны быть больше нуля")
+        return redirect(url_for("admin_settings"))
+
+    new_ref = db.reference(f"config/frozenHouses/{server}").push()
+    new_ref.set({"pd": pd, "count": count, "addedAt": int(time.time())})
+    flash_msg("ok", f"Добавлено: {count} дом(ов) на {pd} PD для {server}")
+    return redirect(url_for("admin_settings"))
+
+@app.route("/admin/frozen/<server>/<rule_id>/remove", methods=["POST"])
+@admin_only
+def admin_frozen_remove(server, rule_id):
+    db.reference(f"config/frozenHouses/{server}/{rule_id}").delete()
+    flash_msg("ok", "Правило убрано")
     return redirect(url_for("admin_settings"))
 
 # ── Исключения: ID домов/бизнесов, которые никогда не попадают в слёты ──
@@ -2138,101 +2184,6 @@ def admin_editor_delete(eid):
     flash_msg("ok", "Редактор удалён")
     return redirect(url_for("admin_editors"))
 
-# ── Автоопределения страховки (спорные случаи на ручную проверку) ─
-@app.route("/admin/autodetect")
-@login_required
-def admin_autodetect():
-    allowed = allowed_servers_for_current_user()
-    data = db.reference("autodetect").get() or {}
-    rows = ""
-    count = 0
-    for srv, entries in data.items():
-        if not isinstance(entries, dict):
-            continue
-        if current_role() == "editor" and srv not in allowed:
-            continue
-        for key, v in entries.items():
-            if not isinstance(v, dict):
-                continue
-            count += 1
-            guess  = v.get("guess", "")
-            reason = v.get("reason", "ambiguous")
-            if reason == "too_fast":
-                guess_label = '<span class="pill bad">⚠️ PD упал больше 2/час — вероятно другой дом</span>'
-            elif guess == "insured":
-                guess_label = "🛡 Страхован"
-            elif guess == "uninsured":
-                guess_label = "🚫 Не страхован"
-            else:
-                guess_label = "—"
-            created = format_msk(v.get("createdAt", 0), "%d.%m.%Y %H:%M")
-            rows += f"""
-            <tr>
-              <td>{srv}</td>
-              <td>{v.get("propType","?")}</td>
-              <td>{v.get("propId") or v.get("pos") or "—"}</td>
-              <td>{v.get("oldPd")} → {v.get("newPd")} <span style="color:var(--muted)">(−{v.get("delta")} за {v.get("elapsedHours")}ч)</span></td>
-              <td>{guess_label}</td>
-              <td>{created}</td>
-              <td class="row">
-                <form class="inline" method="post" action="{url_for('admin_autodetect_resolve', server=srv, key=key)}">
-                  <input type="hidden" name="insured" value="1">
-                  <button type="submit" class="ghost">🛡 Страхован</button>
-                </form>
-                <form class="inline" method="post" action="{url_for('admin_autodetect_resolve', server=srv, key=key)}">
-                  <input type="hidden" name="insured" value="0">
-                  <button type="submit" class="ghost">🚫 Не страхован</button>
-                </form>
-                <form class="inline" method="post" action="{url_for('admin_autodetect_reject', server=srv, key=key)}">
-                  <button type="submit" class="danger">Отклонить</button>
-                </form>
-              </td>
-            </tr>
-            """
-    body = f"""
-    <h1>Автоопределения{f" ({count})" if count else ""}</h1>
-    <div class="card">
-      <p style="color:var(--muted);margin-top:0">
-        Сюда попадают дома, для которых бот не смог однозначно понять — застрахованы они или нет
-        (падение PD между двумя сканами не совпало ровно с 1 или 2 в час — например, дом просканировали
-        через 2+ часа, или PD упал на нестандартную величину). Выберите правильный вариант вручную,
-        либо отклоните — тогда текущий статус объекта не изменится.
-      </p>
-    </div>
-    <table>
-      <tr><th>Сервер</th><th>Тип</th><th>ID/поз.</th><th>PD было → стало</th><th>Предположение</th><th>Когда</th><th></th></tr>
-      {rows or "<tr><td colspan='7'>Пока пусто</td></tr>"}
-    </table>"""
-    return render_page("Автоопределения", "autodetect", body)
-
-@app.route("/admin/autodetect/<server>/<key>/resolve", methods=["POST"])
-@login_required
-def admin_autodetect_resolve(server, key):
-    if current_role() == "editor" and server not in allowed_servers_for_current_user():
-        flash_msg("err", "У вас нет доступа к этому серверу")
-        return redirect(url_for("admin_autodetect"))
-    insured = request.form.get("insured") == "1"
-    prop = db.reference(f"properties/{server}/{key}").get()
-    if isinstance(prop, dict):
-        d_val   = D_INSURED if insured else D_UNINSURED
-        drop_at = get_drop_at(server, prop.get("propType", "house"), insured)
-        db.reference(f"properties/{server}/{key}").update({
-            "insured": insured, "d": d_val, "dropAt": drop_at,
-        })
-    db.reference(f"autodetect/{server}/{key}").delete()
-    flash_msg("ok", "Статус страховки обновлён")
-    return redirect(url_for("admin_autodetect"))
-
-@app.route("/admin/autodetect/<server>/<key>/reject", methods=["POST"])
-@login_required
-def admin_autodetect_reject(server, key):
-    if current_role() == "editor" and server not in allowed_servers_for_current_user():
-        flash_msg("err", "У вас нет доступа к этому серверу")
-        return redirect(url_for("admin_autodetect"))
-    db.reference(f"autodetect/{server}/{key}").delete()
-    flash_msg("ok", "Предложение отклонено")
-    return redirect(url_for("admin_autodetect"))
-
 # ── Риелторка: 2 режима — "Снэпшоты" (последние 3 часа-скана, все
 #   сервера сеткой, как раунд обхода) и "История" (для домов без ID —
 #   неограниченная история по позиции, сравнение любых 2 сканов) ─────
@@ -2282,6 +2233,7 @@ def _render_snapshot_mode(t_param, allowed=None):
         time_buttons += f'<a href="{url}"><button type="button"{cls}>{label}</button></a> '
 
     snap = db.reference(f"sessions/{selected_bucket}").get() or {}
+    all_live_props = db.reference("properties").get() or {}
     cards = ""
     if isinstance(snap, dict):
         for srv in sorted(snap.keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999):
@@ -2290,6 +2242,15 @@ def _render_snapshot_mode(t_param, allowed=None):
             entries = snap.get(srv)
             if not isinstance(entries, dict) or not entries:
                 continue
+
+            # Статус страховки читаем из ЖИВОЙ таблицы properties, а не из
+            # замороженной копии в снэпшоте — иначе после нажатия 🛡/🚫
+            # подсветка кнопки визуально не менялась (баг): запись в
+            # properties обновлялась, а снэпшот — нет, так как это
+            # исторический слепок на момент скана.
+            live_props = all_live_props.get(srv) if isinstance(all_live_props, dict) else None
+            if not isinstance(live_props, dict):
+                live_props = {}
 
             def _sort_key(item):
                 v = item[1]
@@ -2306,7 +2267,8 @@ def _render_snapshot_mode(t_param, allowed=None):
                 icon = "🏠" if v.get("propType") == "house" else "🏢"
                 label = v.get("propId") or v.get("pos") or "—"
                 pd_val = v.get("pd", "?")
-                insured_flag = v.get("insured")
+                live_v = live_props.get(key) if isinstance(live_props, dict) else None
+                insured_flag = infer_insured(live_v) if isinstance(live_v, dict) else v.get("insured")
                 shield_on   = "background:var(--accent);color:#0d0f14;border-color:var(--accent)" if insured_flag is True  else ""
                 noentry_on  = "background:var(--danger);color:#0d0f14;border-color:var(--danger)" if insured_flag is False else ""
                 rows += f"""<tr>

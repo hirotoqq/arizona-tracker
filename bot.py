@@ -106,7 +106,13 @@ def load_banned():
     return set(int(k) for k in data.keys())
 
 def is_banned(chat_id):
-    return int(chat_id) in banned_users
+    """Проверяем бан напрямую в базе (а не только по кэшу banned_users),
+    чтобы разбан/бан с сайта срабатывали мгновенно, а не только после
+    следующей периодической синхронизации (раз в 2 минуты)."""
+    try:
+        return db.reference(f"banned/{int(chat_id)}").get() is not None
+    except Exception:
+        return int(chat_id) in banned_users
 
 def load_subscriptions():
     ref  = db.reference("subscriptions")
@@ -396,7 +402,7 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
     # Заголовок — Markdown
     stats = []
     if house_total: stats.append(f"🏠×{house_total}")
-    if biz_total:   stats.append(f"⭐️🏢×{biz_total}⭐️")
+    if biz_total:   stats.append(f"🏢×{biz_total}")
     stats_str  = " ".join(stats) if stats else ""
     header     = f"*{title}*"
     if stats_str:
