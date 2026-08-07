@@ -70,6 +70,7 @@ D_INSURED   = 1   # застрахованный дом теряет 1 PD в ч�
 D_UNINSURED = 2   # незастрахованный дом теряет 2 PD в час (максимум возможного распада)
 DEFAULT_D = D_INSURED
 HISTORY_RETENTION_SECONDS = 30 * 24 * 3600  # хранить историю сканов домов без ID 30 дней
+DETECT_REQUIRED_STREAK = 2  # для домов без ID: сколько раз подряд должно совпасть автоопределение, прежде чем статус реально применится
 
 # Порог слёта (L) по каждому серверу для ДОМОВ — отдельно застрахованные/нет.
 # Для бизнесов отдельной статистики нет, поэтому по умолчанию используются
@@ -307,6 +308,19 @@ def update():
                 frozen_budget[r_pd] = frozen_budget.get(r_pd, 0) + r_count
     frozen_consumed = {}
 
+    # Для домов БЕЗ ID мы вынуждены опознавать "тот же дом между сканами"
+    # по позиции в списке — а позиция ненадёжна: если хоть один дом в
+    # списке слетел/появился, все позиции после него сдвигаются, и
+    # "house_pos_3" в новом скане может оказаться уже совсем другим домом.
+    # Раньше это иногда приводило к неверному автоопределению страховки.
+    # Фикс: сравниваем и доверяем позиции только если размер списка домов
+    # без ID на этом сервере не изменился между сканами — если изменился,
+    # считаем идентичность неизвестной и не переносим ни статус страховки,
+    # ни автоопределение со старой записи.
+    pos_house_count_in_batch = sum(
+        1 for x in entries if x.get("propType") == "house" and not x.get("propId")
+    )
+
     written = 0
     for e in entries:
         pd = e.get("pd", 0)
@@ -342,18 +356,34 @@ def update():
         # Автоопределение "застрахован / не застрахован": сравниваем новый
         # скан с предыдущим сканом ТОГО ЖЕ дома (по ID, либо по стабильной
         # позиции — см. ключ выше). Если PD упал ровно на 1×часы —
-        # застрахован, ровно на 2×часы — не застрахован. Если неоднозначно —
-        # кладём в очередь на ручную проверку и НЕ трогаем текущий статус.
+        # застрахован, ровно на 2×часы — не застрахован.
+        #
+        # Для домов С ID identity надёжна (ID не меняется) — доверяем
+        # результату сразу. Для домов БЕЗ ID позиция может "уехать" на
+        # другой физический дом даже при стабильном размере списка, поэтому
+        # статус применяется только после DETECT_REQUIRED_STREAK
+        # совпадающих определений подряд — одно случайное совпадение дельты
+        # больше не может сразу поменять статус.
         # ------------------------------------------------------------
         old_rec = existing.get(key)
-        prev_insured = old_rec.get("insured") if isinstance(old_rec, dict) else None
+
+        # Для позиционных (без ID) домов доверяем old_rec, только если
+        # список домов без ID на сервере не поменялся в размере — иначе
+        # позиция могла "уехать" на другой физический дом.
+        identity_stable = True
+        if not prop_id and isinstance(old_rec, dict):
+            old_batch_size = old_rec.get("posBatchSize")
+            if old_batch_size is not None and old_batch_size != pos_house_count_in_batch:
+                identity_stable = False
+
+        prev_insured = old_rec.get("insured") if isinstance(old_rec, dict) and identity_stable else None
         prev_insured = prev_insured if isinstance(prev_insured, bool) else None
 
         client_insured = e.get("insured")
         client_insured = client_insured if isinstance(client_insured, bool) else None
 
-        detected_insured = None
-        if isinstance(old_rec, dict):
+        pairwise_detected = None  # результат ОДНОГО сравнения пары сканов
+        if isinstance(old_rec, dict) and identity_stable:
             old_pd      = old_rec.get("pd")
             old_scan_ts = old_rec.get("scanTs")
             if isinstance(old_pd, (int, float)) and old_scan_ts:
@@ -363,13 +393,33 @@ def update():
                     expected_insured   = elapsed_hours * D_INSURED
                     expected_uninsured = elapsed_hours * D_UNINSURED
                     if delta == expected_insured:
-                        detected_insured = True
+                        pairwise_detected = True
                     elif delta == expected_uninsured:
-                        detected_insured = False
-                    # Если дельта не совпадает ровно ни с одним из вариантов
-                    # (либо вообще физически невозможна, > 2 PD/час) — статус
-                    # не трогаем, ничего никуда не сохраняем на ручную проверку
-                    # (раздел "Автоопределения" убран).
+                        pairwise_detected = False
+                    # Иначе (не совпадает ровно ни с одним из вариантов, либо
+                    # физически невозможно > 2 PD/час) — не засчитываем.
+
+        prev_candidate = old_rec.get("detectCandidate") if isinstance(old_rec, dict) and identity_stable else None
+        prev_streak    = old_rec.get("detectStreak", 0) if isinstance(old_rec, dict) and identity_stable else 0
+        if not isinstance(prev_streak, int):
+            prev_streak = 0
+
+        if prop_id:
+            # ID надёжен — доверяем одиночному сравнению сразу
+            new_candidate = pairwise_detected
+            new_streak    = 1 if pairwise_detected is not None else 0
+            detected_insured = pairwise_detected
+        else:
+            if pairwise_detected is None:
+                new_candidate = prev_candidate
+                new_streak    = prev_streak
+            elif pairwise_detected == prev_candidate:
+                new_candidate = prev_candidate
+                new_streak    = prev_streak + 1
+            else:
+                new_candidate = pairwise_detected
+                new_streak    = 1
+            detected_insured = new_candidate if new_streak >= DETECT_REQUIRED_STREAK else None
 
         if client_insured is not None:
             insured = client_insured
@@ -398,6 +448,9 @@ def update():
             "dropAt":   drop_at,
             "d":        d_val,
             "count":    1,
+            "posBatchSize": pos_house_count_in_batch if (not prop_id and e["propType"] == "house") else None,
+            "detectCandidate": new_candidate,
+            "detectStreak": new_streak,
         }
         written += 1
 
