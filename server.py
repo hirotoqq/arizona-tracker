@@ -2562,6 +2562,8 @@ def _render_compare_mode(a_param, b_param, allowed=None, srv_param=""):
     </div>
     """
 
+    all_live_props = db.reference("properties").get() or {}
+
     def _render_window_cards(bucket, snap):
         """Одно окно скана (как в 'Снэпшотах') — только PD, без диффа."""
         wcards = ""
