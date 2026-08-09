@@ -2562,115 +2562,92 @@ def _render_compare_mode(a_param, b_param, allowed=None, srv_param=""):
     </div>
     """
 
-    snap_older = bucket_data.get(older, {})
-    snap_newer = bucket_data.get(newer, {})
-    all_live_props = db.reference("properties").get() or {}
+    def _render_window_cards(bucket, snap):
+        """Одно окно скана (как в 'Снэпшотах') — только PD, без диффа."""
+        wcards = ""
+        srv_list = [selected_srv] if selected_srv else sorted(
+            snap.keys(), key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999
+        )
+        for srv in srv_list:
+            if allowed is not None and srv not in allowed:
+                continue
+            entries = snap.get(srv)
+            if not isinstance(entries, dict) or not entries:
+                continue
+            live_props = all_live_props.get(srv) if isinstance(all_live_props, dict) else {}
+            if not isinstance(live_props, dict):
+                live_props = {}
 
-    all_compare_servers = sorted(set(snap_older.keys()) | set(snap_newer.keys()),
-                                  key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999)
-    if allowed is not None:
-        all_compare_servers = [s for s in all_compare_servers if s in allowed]
-    if selected_srv:
-        all_compare_servers = [selected_srv] if selected_srv in all_compare_servers else []
+            def _sort_key(item):
+                v = item[1]
+                prop_type = v.get("propType") if isinstance(v, dict) else "house"
+                type_rank = 0 if prop_type == "house" else 1
+                pos = v.get("pos") if isinstance(v, dict) else None
+                pos_rank = pos if isinstance(pos, (int, float)) else 9999
+                return (type_rank, pos_rank)
 
-    cards = ""
-    for srv in all_compare_servers:
-        if allowed is not None and srv not in allowed:
-            continue
-        entries_older = snap_older.get(srv) if isinstance(snap_older.get(srv), dict) else {}
-        entries_newer = snap_newer.get(srv) if isinstance(snap_newer.get(srv), dict) else {}
-        all_keys = set(entries_older.keys()) | set(entries_newer.keys())
-        if not all_keys:
-            continue
-        live_props = all_live_props.get(srv) if isinstance(all_live_props, dict) else {}
-        if not isinstance(live_props, dict):
-            live_props = {}
+            rows = ""
+            for key, v in sorted(entries.items(), key=_sort_key):
+                if not isinstance(v, dict):
+                    continue
+                icon = "🏠" if v.get("propType") == "house" else "🏢"
+                label = v.get("propId") or v.get("pos") or "—"
+                pd_val = v.get("pd", "?")
+                live_v = live_props.get(key) if isinstance(live_props, dict) else None
+                insured_flag = infer_insured(live_v) if isinstance(live_v, dict) else v.get("insured")
+                shield_on   = "background:var(--accent);color:#0d0f14;border-color:var(--accent)" if insured_flag is True  else ""
+                noentry_on  = "background:var(--danger);color:#0d0f14;border-color:var(--danger)" if insured_flag is False else ""
+                rows += f"""<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 3px;border-bottom:1px solid var(--border)">
+                    <div style="min-width:0;flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{v.get('pos','—')}. {icon} №{label}</div>
+                    <div style="flex:0 0 auto"><span class="pill bad" style="font-size:10px;padding:1px 6px">{pd_val} PD</span></div>
+                    <div style="display:flex;gap:3px;flex:0 0 auto">
+                      <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                        <input type="hidden" name="view" value="compare">
+                        <input type="hidden" name="a" value="{bucket_a}">
+                        <input type="hidden" name="b" value="{bucket_b}">
+                        <input type="hidden" name="srv" value="{selected_srv}">
+                        <input type="hidden" name="insured" value="1">
+                        <button type="submit" class="ghost" title="Застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{shield_on}">🛡</button>
+                      </form>
+                      <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                        <input type="hidden" name="view" value="compare">
+                        <input type="hidden" name="a" value="{bucket_a}">
+                        <input type="hidden" name="b" value="{bucket_b}">
+                        <input type="hidden" name="srv" value="{selected_srv}">
+                        <input type="hidden" name="insured" value="0">
+                        <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
+                      </form>
+                      <form class="inline" method="post" action="{url_for('admin_realtor_delete', server=srv, key=key)}" onsubmit="return confirm('Убрать этот дом из списка?')">
+                        <input type="hidden" name="view" value="compare">
+                        <input type="hidden" name="a" value="{bucket_a}">
+                        <input type="hidden" name="b" value="{bucket_b}">
+                        <input type="hidden" name="srv" value="{selected_srv}">
+                        <button type="submit" class="danger" title="Удалить" style="padding:2px 5px;font-size:10px;line-height:1">✕</button>
+                      </form>
+                    </div>
+                  </div>"""
 
-        def _sort_key(key):
-            v = entries_newer.get(key) or entries_older.get(key) or {}
-            prop_type = v.get("propType", "house")
-            type_rank = 0 if prop_type == "house" else 1
-            pos = v.get("pos")
-            return (type_rank, pos if isinstance(pos, (int, float)) else 9999)
+            wcards += f"""
+            <div class="card" style="padding:10px 12px;font-size:12px">
+              <div style="font-weight:700;margin-bottom:6px;font-size:13px">{server_label(srv)}</div>
+              {rows}
+            </div>"""
 
-        rows = ""
-        for key in sorted(all_keys, key=_sort_key):
-            vo = entries_older.get(key)
-            vn = entries_newer.get(key)
-            ref_v = vn or vo or {}
-            icon = "🏠" if ref_v.get("propType") == "house" else "🏢"
-            label = ref_v.get("propId") or ref_v.get("pos") or "—"
-            pd_o = vo.get("pd") if isinstance(vo, dict) else None
-            pd_n = vn.get("pd") if isinstance(vn, dict) else None
+        return wcards or "<div class='card'>Нет данных за это время.</div>"
 
-            if pd_o is None:
-                guess_html = '<span style="color:var(--muted)">новый дом</span>'
-            elif pd_n is None:
-                guess_html = '<span style="color:var(--muted)">пропал (слетел?)</span>'
-            else:
-                delta = pd_o - pd_n
-                if elapsed_hours < 1:
-                    guess_html = '<span style="color:var(--muted)">мало времени</span>'
-                elif delta <= 0:
-                    guess_html = '<span class="pill bad">⚠️ PD не упал</span>'
-                elif delta == elapsed_hours * D_INSURED:
-                    guess_html = '🛡 Страхован'
-                elif delta == elapsed_hours * D_UNINSURED:
-                    guess_html = '🚫 Не страхован'
-                elif delta > elapsed_hours * D_UNINSURED:
-                    guess_html = '<span class="pill bad">⚠️ упал &gt;2/ч</span>'
-                else:
-                    guess_html = '<span style="color:var(--muted)">неточно</span>'
-
-            live_v = live_props.get(key)
-            insured_flag = infer_insured(live_v) if isinstance(live_v, dict) else None
-            shield_on  = "background:var(--accent);color:#0d0f14;border-color:var(--accent)" if insured_flag is True  else ""
-            noentry_on = "background:var(--danger);color:#0d0f14;border-color:var(--danger)" if insured_flag is False else ""
-
-            rows += f"""<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 3px;border-bottom:1px solid var(--border)">
-                <div style="min-width:0;flex:1 1 auto">
-                  <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{icon} №{label}: {pd_o if pd_o is not None else "—"} → {pd_n if pd_n is not None else "—"}</div>
-                  <div style="margin-top:3px">{guess_html}</div>
-                </div>
-                <div style="display:flex;gap:3px;flex:0 0 auto">
-                  <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
-                    <input type="hidden" name="view" value="compare">
-                    <input type="hidden" name="a" value="{bucket_a}">
-                    <input type="hidden" name="b" value="{bucket_b}">
-                    <input type="hidden" name="srv" value="{selected_srv}">
-                    <input type="hidden" name="insured" value="1">
-                    <button type="submit" class="ghost" title="Застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{shield_on}">🛡</button>
-                  </form>
-                  <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
-                    <input type="hidden" name="view" value="compare">
-                    <input type="hidden" name="a" value="{bucket_a}">
-                    <input type="hidden" name="b" value="{bucket_b}">
-                    <input type="hidden" name="srv" value="{selected_srv}">
-                    <input type="hidden" name="insured" value="0">
-                    <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
-                  </form>
-                  <form class="inline" method="post" action="{url_for('admin_realtor_delete', server=srv, key=key)}" onsubmit="return confirm('Убрать этот дом из списка?')">
-                    <input type="hidden" name="view" value="compare">
-                    <input type="hidden" name="a" value="{bucket_a}">
-                    <input type="hidden" name="b" value="{bucket_b}">
-                    <input type="hidden" name="srv" value="{selected_srv}">
-                    <button type="submit" class="danger" title="Удалить" style="padding:2px 5px;font-size:10px;line-height:1">✕</button>
-                  </form>
-                </div>
-              </div>"""
-
-        cards += f"""
-        <div class="card" style="padding:10px 12px;font-size:12px">
-          <div style="font-weight:700;margin-bottom:6px;font-size:13px">{server_label(srv)}</div>
-          {rows}
-        </div>"""
-
-    grid = f"""
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px;align-items:start">
-      {cards or "<div class='card'>Нет данных для сравнения на выбранных сканах.</div>"}
+    windows = f"""
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;align-items:start">
+      <div>
+        <div style="font-weight:700;margin-bottom:8px">Скан 1 — {format_msk(bucket_a, "%H:00 (%d.%m)")}</div>
+        {_render_window_cards(bucket_a, bucket_data.get(bucket_a, {}))}
+      </div>
+      <div>
+        <div style="font-weight:700;margin-bottom:8px">Скан 2 — {format_msk(bucket_b, "%H:00 (%d.%m)")}</div>
+        {_render_window_cards(bucket_b, bucket_data.get(bucket_b, {}))}
+      </div>
     </div>
     """
-    return picker + grid
+    return picker + windows
 
 @app.route("/admin/realtor")
 @login_required
