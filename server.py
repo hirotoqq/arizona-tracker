@@ -2468,11 +2468,11 @@ def _render_history_mode(allowed=None):
     """
     return intro + grid
 
-def _render_compare_mode(a_param, b_param, allowed=None):
-    """Сравнение любых двух сканов (снэпшотов-часов) по ВСЕМ серверам сразу —
-    работает и для домов с ID, и без ID, и для бизнесов. Например: скан в
-    13:00 и скан в 14:00 — видно PD в обеих точках, разницу и предположение
-    о страховке."""
+def _render_compare_mode(a_param, b_param, allowed=None, srv_param=""):
+    """Сравнение любых двух сканов (снэпшотов-часов) — по ВСЕМ серверам сразу
+    или по одному выбранному серверу. Работает и для домов с ID, и без ID,
+    и для бизнесов. Например: сервер Brainburg, скан в 13:00 и скан в
+    14:00 — видно PD в обеих точках, разницу и предположение о страховке."""
     sessions_index = db.reference("sessions_index").get() or []
     if not isinstance(sessions_index, list):
         sessions_index = []
@@ -2500,10 +2500,31 @@ def _render_compare_mode(a_param, b_param, allowed=None):
         f'<option value="{b}">{format_msk(b, "%H:00 (%d.%m)")}</option>' for b in sessions_index
     )
 
+    snap_older = db.reference(f"sessions/{older}").get() or {}
+    snap_newer = db.reference(f"sessions/{newer}").get() or {}
+    all_live_props = db.reference("properties").get() or {}
+    if not isinstance(snap_older, dict): snap_older = {}
+    if not isinstance(snap_newer, dict): snap_newer = {}
+
+    all_servers = sorted(set(snap_older.keys()) | set(snap_newer.keys()),
+                          key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999)
+    if allowed is not None:
+        all_servers = [s for s in all_servers if s in allowed]
+
+    selected_srv = srv_param if srv_param in all_servers else ""
+
+    srv_options = '<option value="">Все сервера</option>' + "".join(
+        f'<option value="{s}"{" selected" if s == selected_srv else ""}>{server_label(s)}</option>'
+        for s in all_servers
+    )
+
     picker = f"""
     <div class="card" style="margin-bottom:14px">
       <form method="get" class="row" style="align-items:center">
         <input type="hidden" name="view" value="compare">
+        <label style="color:var(--muted);font-size:13px">Сервер
+          <select name="srv">{srv_options}</select>
+        </label>
         <label style="color:var(--muted);font-size:13px">Скан 1
           <select name="a">{time_options.replace(f'value="{older}"', f'value="{older}" selected')}</select>
         </label>
@@ -2516,14 +2537,8 @@ def _render_compare_mode(a_param, b_param, allowed=None):
     </div>
     """
 
-    snap_older = db.reference(f"sessions/{older}").get() or {}
-    snap_newer = db.reference(f"sessions/{newer}").get() or {}
-    all_live_props = db.reference("properties").get() or {}
-    if not isinstance(snap_older, dict): snap_older = {}
-    if not isinstance(snap_newer, dict): snap_newer = {}
-
-    all_servers = sorted(set(snap_older.keys()) | set(snap_newer.keys()),
-                          key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999)
+    if selected_srv:
+        all_servers = [selected_srv]
 
     cards = ""
     for srv in all_servers:
@@ -2588,6 +2603,7 @@ def _render_compare_mode(a_param, b_param, allowed=None):
                   <input type="hidden" name="view" value="compare">
                   <input type="hidden" name="a" value="{bucket_a}">
                   <input type="hidden" name="b" value="{bucket_b}">
+                  <input type="hidden" name="srv" value="{selected_srv}">
                   <input type="hidden" name="insured" value="1">
                   <button type="submit" class="ghost" title="Застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{shield_on}">🛡</button>
                 </form>
@@ -2595,6 +2611,7 @@ def _render_compare_mode(a_param, b_param, allowed=None):
                   <input type="hidden" name="view" value="compare">
                   <input type="hidden" name="a" value="{bucket_a}">
                   <input type="hidden" name="b" value="{bucket_b}">
+                  <input type="hidden" name="srv" value="{selected_srv}">
                   <input type="hidden" name="insured" value="0">
                   <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
                 </form>
@@ -2602,6 +2619,7 @@ def _render_compare_mode(a_param, b_param, allowed=None):
                   <input type="hidden" name="view" value="compare">
                   <input type="hidden" name="a" value="{bucket_a}">
                   <input type="hidden" name="b" value="{bucket_b}">
+                  <input type="hidden" name="srv" value="{selected_srv}">
                   <button type="submit" class="danger" title="Удалить" style="padding:2px 5px;font-size:10px;line-height:1">✕</button>
                 </form>
               </td>
@@ -2636,7 +2654,8 @@ def admin_realtor():
     if view == "snapshot":
         content = _render_snapshot_mode(request.args.get("t", ""), allowed=allowed)
     elif view == "compare":
-        content = _render_compare_mode(request.args.get("a", ""), request.args.get("b", ""), allowed=allowed)
+        content = _render_compare_mode(request.args.get("a", ""), request.args.get("b", ""), allowed=allowed,
+                                        srv_param=request.args.get("srv", ""))
     else:
         content = _render_history_mode(allowed=allowed)
 
@@ -2647,7 +2666,8 @@ def _realtor_redirect_url():
     if view == "history":
         return url_for("admin_realtor", view="history")
     if view == "compare":
-        return url_for("admin_realtor", view="compare", a=request.form.get("a", ""), b=request.form.get("b", ""))
+        return url_for("admin_realtor", view="compare", a=request.form.get("a", ""), b=request.form.get("b", ""),
+                        srv=request.form.get("srv", ""))
     return url_for("admin_realtor", view="snapshot", t=request.form.get("t", ""))
 
 @app.route("/admin/realtor/<server>/<key>/set-insured", methods=["POST"])
