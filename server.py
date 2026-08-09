@@ -2470,9 +2470,9 @@ def _render_history_mode(allowed=None):
 
 def _render_compare_mode(a_param, b_param, allowed=None, srv_param=""):
     """Сравнение любых двух сканов (снэпшотов-часов) — по ВСЕМ серверам сразу
-    или по одному выбранному серверу. Работает и для домов с ID, и без ID,
-    и для бизнесов. Например: сервер Brainburg, скан в 13:00 и скан в
-    14:00 — видно PD в обеих точках, разницу и предположение о страховке."""
+    или по одному выбранному серверу. Времена для скана 1 / скана 2 выбираются
+    отдельными плашками и показывают только те часы, когда реально сканировали
+    выбранный сервер (а не вообще все раунды)."""
     sessions_index = db.reference("sessions_index").get() or []
     if not isinstance(sessions_index, list):
         sessions_index = []
@@ -2484,64 +2484,97 @@ def _render_compare_mode(a_param, b_param, allowed=None, srv_param=""):
     if len(sessions_index) < 2:
         return '<div class="card">Нужно как минимум 2 сохранённых скана-часа для сравнения. Пока доступно: ' + str(len(sessions_index)) + '.</div>'
 
-    def _parse_bucket(param, fallback):
-        try:
-            v = int(param)
-            return v if v in sessions_index else fallback
-        except (ValueError, TypeError):
-            return fallback
+    # sessions_index хранит максимум 3 последних часа-раунда (см. auto_cleanup),
+    # поэтому не страшно вытянуть данные по всем сразу — это максимум 3 запроса.
+    bucket_data = {}
+    for b in sessions_index:
+        d = db.reference(f"sessions/{b}").get() or {}
+        bucket_data[b] = d if isinstance(d, dict) else {}
 
-    bucket_a = _parse_bucket(a_param, sessions_index[1] if len(sessions_index) > 1 else sessions_index[0])
-    bucket_b = _parse_bucket(b_param, sessions_index[0])
-    older, newer = min(bucket_a, bucket_b), max(bucket_a, bucket_b)
-    elapsed_hours = round((newer - older) / 3600)
-
-    time_options = "".join(
-        f'<option value="{b}">{format_msk(b, "%H:00 (%d.%m)")}</option>' for b in sessions_index
+    all_servers = sorted(
+        {srv for d in bucket_data.values() for srv in d.keys()},
+        key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999,
     )
-
-    snap_older = db.reference(f"sessions/{older}").get() or {}
-    snap_newer = db.reference(f"sessions/{newer}").get() or {}
-    all_live_props = db.reference("properties").get() or {}
-    if not isinstance(snap_older, dict): snap_older = {}
-    if not isinstance(snap_newer, dict): snap_newer = {}
-
-    all_servers = sorted(set(snap_older.keys()) | set(snap_newer.keys()),
-                          key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999)
     if allowed is not None:
         all_servers = [s for s in all_servers if s in allowed]
 
     selected_srv = srv_param if srv_param in all_servers else ""
 
-    srv_options = '<option value="">Все сервера</option>' + "".join(
-        f'<option value="{s}"{" selected" if s == selected_srv else ""}>{server_label(s)}</option>'
-        for s in all_servers
-    )
+    srv_pills = ""
+    all_url = url_for('admin_realtor', view='compare', a=a_param, b=b_param, srv="")
+    all_cls = "" if not selected_srv else ' class="ghost"'
+    srv_pills += f'<a href="{all_url}"><button type="button"{all_cls}>Все сервера</button></a> '
+    for s in all_servers:
+        s_url = url_for('admin_realtor', view='compare', a=a_param, b=b_param, srv=s)
+        s_cls = "" if s == selected_srv else ' class="ghost"'
+        srv_pills += f'<a href="{s_url}"><button type="button"{s_cls}>{server_label(s)}</button></a> '
+
+    # Часы, доступные для сравнения: если выбран конкретный сервер — только
+    # те раунды, где по нему реально есть данные; иначе — все раунды.
+    if selected_srv:
+        available_buckets = [b for b in sessions_index if bucket_data.get(b, {}).get(selected_srv)]
+    else:
+        available_buckets = sessions_index
+
+    if len(available_buckets) < 2:
+        srv_name = server_label(selected_srv) if selected_srv else "выбранных серверов"
+        return f"""
+        <div class="card" style="margin-bottom:14px">
+          <div class="row" style="gap:8px;flex-wrap:wrap">{srv_pills}</div>
+        </div>
+        <div class="card">Недостаточно сканов для сервера {srv_name} — нужно минимум 2, доступно: {len(available_buckets)}.</div>
+        """
+
+    def _parse_bucket(param, fallback):
+        try:
+            v = int(param)
+            return v if v in available_buckets else fallback
+        except (ValueError, TypeError):
+            return fallback
+
+    bucket_a = _parse_bucket(a_param, available_buckets[1] if len(available_buckets) > 1 else available_buckets[0])
+    bucket_b = _parse_bucket(b_param, available_buckets[0])
+    older, newer = min(bucket_a, bucket_b), max(bucket_a, bucket_b)
+    elapsed_hours = round((newer - older) / 3600)
+
+    def _time_pills(field, current):
+        pills = ""
+        for b in available_buckets:
+            label = format_msk(b, "%H:00 (%d.%m)")
+            active = (b == current)
+            other = bucket_b if field == "a" else bucket_a
+            a_val = b if field == "a" else other
+            b_val = other if field == "a" else b
+            url = url_for('admin_realtor', view='compare', a=a_val, b=b_val, srv=selected_srv)
+            cls = "" if active else ' class="ghost"'
+            pills += f'<a href="{url}"><button type="button"{cls}>{label}</button></a> '
+        return pills
 
     picker = f"""
     <div class="card" style="margin-bottom:14px">
-      <form method="get" class="row" style="align-items:center">
-        <input type="hidden" name="view" value="compare">
-        <label style="color:var(--muted);font-size:13px">Сервер
-          <select name="srv">{srv_options}</select>
-        </label>
-        <label style="color:var(--muted);font-size:13px">Скан 1
-          <select name="a">{time_options.replace(f'value="{older}"', f'value="{older}" selected')}</select>
-        </label>
-        <label style="color:var(--muted);font-size:13px">Скан 2
-          <select name="b">{time_options.replace(f'value="{newer}"', f'value="{newer}" selected')}</select>
-        </label>
-        <button type="submit">Сравнить</button>
-        <span style="color:var(--muted);font-size:13px">между сканами: {elapsed_hours}ч</span>
-      </form>
+      <div style="color:var(--muted);font-size:13px;margin-bottom:6px">Сервер:</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:14px">{srv_pills}</div>
+      <div style="color:var(--muted);font-size:13px;margin-bottom:6px">Скан 1:</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:14px">{_time_pills('a', bucket_a)}</div>
+      <div style="color:var(--muted);font-size:13px;margin-bottom:6px">Скан 2:</div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">{_time_pills('b', bucket_b)}</div>
+      <div style="color:var(--muted);font-size:13px;margin-top:10px">между сканами: {elapsed_hours}ч</div>
     </div>
     """
 
+    snap_older = bucket_data.get(older, {})
+    snap_newer = bucket_data.get(newer, {})
+    all_live_props = db.reference("properties").get() or {}
+
+    all_compare_servers = sorted(set(snap_older.keys()) | set(snap_newer.keys()),
+                                  key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999)
+    if allowed is not None:
+        all_compare_servers = [s for s in all_compare_servers if s in allowed]
     if selected_srv:
-        all_servers = [selected_srv]
+        all_compare_servers = [selected_srv] if selected_srv in all_compare_servers else []
 
     cards = ""
-    for srv in all_servers:
+    for srv in all_compare_servers:
         if allowed is not None and srv not in allowed:
             continue
         entries_older = snap_older.get(srv) if isinstance(snap_older.get(srv), dict) else {}
