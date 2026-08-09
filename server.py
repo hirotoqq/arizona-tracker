@@ -69,7 +69,7 @@ DEFAULT_DROP_AT_UNINSURED = 3
 D_INSURED   = 1   # застрахованный дом теряет 1 PD в час
 D_UNINSURED = 2   # незастрахованный дом теряет 2 PD в час (максимум возможного распада)
 DEFAULT_D = D_INSURED
-HISTORY_RETENTION_SECONDS = 30 * 24 * 3600  # хранить историю сканов домов без ID 30 дней
+HISTORY_RETENTION_SECONDS = 48 * 3600  # хранить историю сканов домов без ID 48ч (раньше было 30 дней при том что показывались только последние 24ч — лишние данные тормозили загрузку страницы)
 DETECT_REQUIRED_STREAK = 2  # для домов без ID: сколько раз подряд должно совпасть автоопределение, прежде чем статус реально применится
 
 # Порог слёта (L) по каждому серверу для ДОМОВ — отдельно застрахованные/нет.
@@ -2245,12 +2245,15 @@ REALTOR_JS = ""
 def _realtor_tabs(active_view):
     snap_url = url_for('admin_realtor', view='snapshot')
     hist_url = url_for('admin_realtor', view='history')
+    cmp_url  = url_for('admin_realtor', view='compare')
     snap_cls = "" if active_view == "snapshot" else ' class="ghost"'
     hist_cls = "" if active_view == "history" else ' class="ghost"'
+    cmp_cls  = "" if active_view == "compare" else ' class="ghost"'
     return f"""
     <div class="row" style="gap:8px;margin-bottom:14px">
       <a href="{snap_url}"><button type="button"{snap_cls}>📸 Снэпшоты</button></a>
       <a href="{hist_url}"><button type="button"{hist_cls}>📊 История</button></a>
+      <a href="{cmp_url}"><button type="button"{cmp_cls}>🔄 Сравнение</button></a>
     </div>
     """
 
@@ -2340,6 +2343,11 @@ def _render_snapshot_mode(t_param, allowed=None):
                       <input type="hidden" name="insured" value="0">
                       <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
                     </form>
+                    <form class="inline" method="post" action="{url_for('admin_realtor_delete', server=srv, key=key)}" onsubmit="return confirm('Убрать этот дом из списка?')">
+                      <input type="hidden" name="view" value="snapshot">
+                      <input type="hidden" name="t" value="{selected_bucket}">
+                      <button type="submit" class="danger" title="Удалить" style="padding:2px 5px;font-size:10px;line-height:1">✕</button>
+                    </form>
                   </td>
                 </tr>"""
 
@@ -2369,6 +2377,7 @@ def _render_history_mode(allowed=None):
     в том же компактном стиле карточек, что и 'Снэпшоты'."""
     now = int(time.time())
     since = now - HISTORY_WINDOW_SECONDS
+    retention_cutoff = now - HISTORY_RETENTION_SECONDS
     all_history = db.reference("history").get() or {}
 
     cards = ""
@@ -2392,6 +2401,11 @@ def _render_history_mode(allowed=None):
                         ts = int(ts_str)
                         pd_val = int(v.get("pd")) if isinstance(v, dict) else None
                     except (ValueError, TypeError):
+                        continue
+                    # Подчищаем то, что уже успело накопиться сверх текущего
+                    # окна хранения (раньше оно было 30 дней, теперь 48ч).
+                    if ts < retention_cutoff:
+                        db.reference(f"history/{srv}/{key}/{ts_str}").delete()
                         continue
                     if pd_val is None or ts < since:
                         continue
@@ -2424,6 +2438,10 @@ def _render_history_mode(allowed=None):
                       <input type="hidden" name="insured" value="0">
                       <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
                     </form>
+                    <form class="inline" method="post" action="{url_for('admin_realtor_delete', server=srv, key=key)}" onsubmit="return confirm('Убрать этот дом из списка?')">
+                      <input type="hidden" name="view" value="history">
+                      <button type="submit" class="danger" title="Удалить" style="padding:2px 5px;font-size:10px;line-height:1">✕</button>
+                    </form>
                   </td>
                 </tr>"""
 
@@ -2450,11 +2468,166 @@ def _render_history_mode(allowed=None):
     """
     return intro + grid
 
+def _render_compare_mode(a_param, b_param, allowed=None):
+    """Сравнение любых двух сканов (снэпшотов-часов) по ВСЕМ серверам сразу —
+    работает и для домов с ID, и без ID, и для бизнесов. Например: скан в
+    13:00 и скан в 14:00 — видно PD в обеих точках, разницу и предположение
+    о страховке."""
+    sessions_index = db.reference("sessions_index").get() or []
+    if not isinstance(sessions_index, list):
+        sessions_index = []
+    try:
+        sessions_index = sorted({int(x) for x in sessions_index}, reverse=True)
+    except (ValueError, TypeError):
+        sessions_index = []
+
+    if len(sessions_index) < 2:
+        return '<div class="card">Нужно как минимум 2 сохранённых скана-часа для сравнения. Пока доступно: ' + str(len(sessions_index)) + '.</div>'
+
+    def _parse_bucket(param, fallback):
+        try:
+            v = int(param)
+            return v if v in sessions_index else fallback
+        except (ValueError, TypeError):
+            return fallback
+
+    bucket_a = _parse_bucket(a_param, sessions_index[1] if len(sessions_index) > 1 else sessions_index[0])
+    bucket_b = _parse_bucket(b_param, sessions_index[0])
+    older, newer = min(bucket_a, bucket_b), max(bucket_a, bucket_b)
+    elapsed_hours = round((newer - older) / 3600)
+
+    time_options = "".join(
+        f'<option value="{b}">{format_msk(b, "%H:00 (%d.%m)")}</option>' for b in sessions_index
+    )
+
+    picker = f"""
+    <div class="card" style="margin-bottom:14px">
+      <form method="get" class="row" style="align-items:center">
+        <input type="hidden" name="view" value="compare">
+        <label style="color:var(--muted);font-size:13px">Скан 1
+          <select name="a">{time_options.replace(f'value="{older}"', f'value="{older}" selected')}</select>
+        </label>
+        <label style="color:var(--muted);font-size:13px">Скан 2
+          <select name="b">{time_options.replace(f'value="{newer}"', f'value="{newer}" selected')}</select>
+        </label>
+        <button type="submit">Сравнить</button>
+        <span style="color:var(--muted);font-size:13px">между сканами: {elapsed_hours}ч</span>
+      </form>
+    </div>
+    """
+
+    snap_older = db.reference(f"sessions/{older}").get() or {}
+    snap_newer = db.reference(f"sessions/{newer}").get() or {}
+    all_live_props = db.reference("properties").get() or {}
+    if not isinstance(snap_older, dict): snap_older = {}
+    if not isinstance(snap_newer, dict): snap_newer = {}
+
+    all_servers = sorted(set(snap_older.keys()) | set(snap_newer.keys()),
+                          key=lambda s: SERVER_ORDER.index(s) if s in SERVER_ORDER else 999)
+
+    cards = ""
+    for srv in all_servers:
+        if allowed is not None and srv not in allowed:
+            continue
+        entries_older = snap_older.get(srv) if isinstance(snap_older.get(srv), dict) else {}
+        entries_newer = snap_newer.get(srv) if isinstance(snap_newer.get(srv), dict) else {}
+        all_keys = set(entries_older.keys()) | set(entries_newer.keys())
+        if not all_keys:
+            continue
+        live_props = all_live_props.get(srv) if isinstance(all_live_props, dict) else {}
+        if not isinstance(live_props, dict):
+            live_props = {}
+
+        def _sort_key(key):
+            v = entries_newer.get(key) or entries_older.get(key) or {}
+            prop_type = v.get("propType", "house")
+            type_rank = 0 if prop_type == "house" else 1
+            pos = v.get("pos")
+            return (type_rank, pos if isinstance(pos, (int, float)) else 9999)
+
+        rows = ""
+        for key in sorted(all_keys, key=_sort_key):
+            vo = entries_older.get(key)
+            vn = entries_newer.get(key)
+            ref_v = vn or vo or {}
+            icon = "🏠" if ref_v.get("propType") == "house" else "🏢"
+            label = ref_v.get("propId") or ref_v.get("pos") or "—"
+            pd_o = vo.get("pd") if isinstance(vo, dict) else None
+            pd_n = vn.get("pd") if isinstance(vn, dict) else None
+
+            if pd_o is None:
+                guess_html = '<span style="color:var(--muted)">новый дом</span>'
+            elif pd_n is None:
+                guess_html = '<span style="color:var(--muted)">пропал (слетел?)</span>'
+            else:
+                delta = pd_o - pd_n
+                if elapsed_hours < 1:
+                    guess_html = '<span style="color:var(--muted)">мало времени</span>'
+                elif delta <= 0:
+                    guess_html = '<span class="pill bad">⚠️ PD не упал</span>'
+                elif delta == elapsed_hours * D_INSURED:
+                    guess_html = '🛡 Страхован'
+                elif delta == elapsed_hours * D_UNINSURED:
+                    guess_html = '🚫 Не страхован'
+                elif delta > elapsed_hours * D_UNINSURED:
+                    guess_html = '<span class="pill bad">⚠️ упал &gt;2/ч</span>'
+                else:
+                    guess_html = '<span style="color:var(--muted)">неточно</span>'
+
+            live_v = live_props.get(key)
+            insured_flag = infer_insured(live_v) if isinstance(live_v, dict) else None
+            shield_on  = "background:var(--accent);color:#0d0f14;border-color:var(--accent)" if insured_flag is True  else ""
+            noentry_on = "background:var(--danger);color:#0d0f14;border-color:var(--danger)" if insured_flag is False else ""
+
+            rows += f"""<tr>
+              <td style="padding:4px 3px;white-space:nowrap">{icon} №{label}</td>
+              <td style="padding:4px 3px;white-space:nowrap">{pd_o if pd_o is not None else "—"} → {pd_n if pd_n is not None else "—"}</td>
+              <td style="padding:4px 3px;white-space:nowrap">{guess_html}</td>
+              <td style="padding:4px 3px;white-space:nowrap;text-align:right">
+                <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                  <input type="hidden" name="view" value="compare">
+                  <input type="hidden" name="a" value="{bucket_a}">
+                  <input type="hidden" name="b" value="{bucket_b}">
+                  <input type="hidden" name="insured" value="1">
+                  <button type="submit" class="ghost" title="Застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{shield_on}">🛡</button>
+                </form>
+                <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                  <input type="hidden" name="view" value="compare">
+                  <input type="hidden" name="a" value="{bucket_a}">
+                  <input type="hidden" name="b" value="{bucket_b}">
+                  <input type="hidden" name="insured" value="0">
+                  <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
+                </form>
+                <form class="inline" method="post" action="{url_for('admin_realtor_delete', server=srv, key=key)}" onsubmit="return confirm('Убрать этот дом из списка?')">
+                  <input type="hidden" name="view" value="compare">
+                  <input type="hidden" name="a" value="{bucket_a}">
+                  <input type="hidden" name="b" value="{bucket_b}">
+                  <button type="submit" class="danger" title="Удалить" style="padding:2px 5px;font-size:10px;line-height:1">✕</button>
+                </form>
+              </td>
+            </tr>"""
+
+        cards += f"""
+        <div class="card" style="padding:10px 12px;font-size:12px">
+          <div style="font-weight:700;margin-bottom:6px;font-size:13px">{server_label(srv)}</div>
+          <table style="font-size:12px;table-layout:fixed">
+            <tr><th style="padding:3px">Объект</th><th style="padding:3px">PD</th><th style="padding:3px">Итог</th><th style="padding:3px"></th></tr>
+            {rows}
+          </table>
+        </div>"""
+
+    grid = f"""
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px;align-items:start">
+      {cards or "<div class='card'>Нет данных для сравнения на выбранных сканах.</div>"}
+    </div>
+    """
+    return picker + grid
+
 @app.route("/admin/realtor")
 @login_required
 def admin_realtor():
     view = request.args.get("view", "snapshot")
-    if view not in ("snapshot", "history"):
+    if view not in ("snapshot", "history", "compare"):
         view = "snapshot"
 
     tabs = _realtor_tabs(view)
@@ -2462,10 +2635,20 @@ def admin_realtor():
 
     if view == "snapshot":
         content = _render_snapshot_mode(request.args.get("t", ""), allowed=allowed)
+    elif view == "compare":
+        content = _render_compare_mode(request.args.get("a", ""), request.args.get("b", ""), allowed=allowed)
     else:
         content = _render_history_mode(allowed=allowed)
 
     return render_page("Риелторка", "realtor", f"<h1>Риелторка</h1>{tabs}{content}{REALTOR_JS}")
+
+def _realtor_redirect_url():
+    view = request.form.get("view", "snapshot")
+    if view == "history":
+        return url_for("admin_realtor", view="history")
+    if view == "compare":
+        return url_for("admin_realtor", view="compare", a=request.form.get("a", ""), b=request.form.get("b", ""))
+    return url_for("admin_realtor", view="snapshot", t=request.form.get("t", ""))
 
 @app.route("/admin/realtor/<server>/<key>/set-insured", methods=["POST"])
 @login_required
@@ -2486,11 +2669,19 @@ def admin_realtor_set_insured(server, key):
     else:
         flash_msg("err", "Запись уже не активна (истекла) — статус не изменён")
 
-    view = request.form.get("view", "snapshot")
-    if view == "history":
-        return redirect(url_for("admin_realtor", view="history"))
-    t = request.form.get("t", "")
-    return redirect(url_for("admin_realtor", view="snapshot", t=t))
+    return redirect(_realtor_redirect_url())
+
+@app.route("/admin/realtor/<server>/<key>/delete", methods=["POST"])
+@login_required
+def admin_realtor_delete(server, key):
+    if current_role() == "editor" and server not in allowed_servers_for_current_user():
+        flash_msg("err", "У вас нет доступа к этому серверу")
+        return redirect(url_for("admin_realtor"))
+
+    db.reference(f"properties/{server}/{key}").delete()
+    db.reference(f"history/{server}/{key}").delete()
+    flash_msg("ok", "Дом убран из списка")
+    return redirect(_realtor_redirect_url())
 
 @app.route("/admin/broadcast")
 @admin_only
