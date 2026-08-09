@@ -2627,44 +2627,42 @@ def _render_compare_mode(a_param, b_param, allowed=None, srv_param=""):
             shield_on  = "background:var(--accent);color:#0d0f14;border-color:var(--accent)" if insured_flag is True  else ""
             noentry_on = "background:var(--danger);color:#0d0f14;border-color:var(--danger)" if insured_flag is False else ""
 
-            rows += f"""<tr>
-              <td style="padding:4px 3px;white-space:nowrap">{icon} №{label}</td>
-              <td style="padding:4px 3px;white-space:nowrap">{pd_o if pd_o is not None else "—"} → {pd_n if pd_n is not None else "—"}</td>
-              <td style="padding:4px 3px;white-space:nowrap">{guess_html}</td>
-              <td style="padding:4px 3px;white-space:nowrap;text-align:right">
-                <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
-                  <input type="hidden" name="view" value="compare">
-                  <input type="hidden" name="a" value="{bucket_a}">
-                  <input type="hidden" name="b" value="{bucket_b}">
-                  <input type="hidden" name="srv" value="{selected_srv}">
-                  <input type="hidden" name="insured" value="1">
-                  <button type="submit" class="ghost" title="Застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{shield_on}">🛡</button>
-                </form>
-                <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
-                  <input type="hidden" name="view" value="compare">
-                  <input type="hidden" name="a" value="{bucket_a}">
-                  <input type="hidden" name="b" value="{bucket_b}">
-                  <input type="hidden" name="srv" value="{selected_srv}">
-                  <input type="hidden" name="insured" value="0">
-                  <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
-                </form>
-                <form class="inline" method="post" action="{url_for('admin_realtor_delete', server=srv, key=key)}" onsubmit="return confirm('Убрать этот дом из списка?')">
-                  <input type="hidden" name="view" value="compare">
-                  <input type="hidden" name="a" value="{bucket_a}">
-                  <input type="hidden" name="b" value="{bucket_b}">
-                  <input type="hidden" name="srv" value="{selected_srv}">
-                  <button type="submit" class="danger" title="Удалить" style="padding:2px 5px;font-size:10px;line-height:1">✕</button>
-                </form>
-              </td>
-            </tr>"""
+            rows += f"""<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 3px;border-bottom:1px solid var(--border)">
+                <div style="min-width:0;flex:1 1 auto">
+                  <div style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{icon} №{label}: {pd_o if pd_o is not None else "—"} → {pd_n if pd_n is not None else "—"}</div>
+                  <div style="margin-top:3px">{guess_html}</div>
+                </div>
+                <div style="display:flex;gap:3px;flex:0 0 auto">
+                  <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                    <input type="hidden" name="view" value="compare">
+                    <input type="hidden" name="a" value="{bucket_a}">
+                    <input type="hidden" name="b" value="{bucket_b}">
+                    <input type="hidden" name="srv" value="{selected_srv}">
+                    <input type="hidden" name="insured" value="1">
+                    <button type="submit" class="ghost" title="Застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{shield_on}">🛡</button>
+                  </form>
+                  <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                    <input type="hidden" name="view" value="compare">
+                    <input type="hidden" name="a" value="{bucket_a}">
+                    <input type="hidden" name="b" value="{bucket_b}">
+                    <input type="hidden" name="srv" value="{selected_srv}">
+                    <input type="hidden" name="insured" value="0">
+                    <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
+                  </form>
+                  <form class="inline" method="post" action="{url_for('admin_realtor_delete', server=srv, key=key)}" onsubmit="return confirm('Убрать этот дом из списка?')">
+                    <input type="hidden" name="view" value="compare">
+                    <input type="hidden" name="a" value="{bucket_a}">
+                    <input type="hidden" name="b" value="{bucket_b}">
+                    <input type="hidden" name="srv" value="{selected_srv}">
+                    <button type="submit" class="danger" title="Удалить" style="padding:2px 5px;font-size:10px;line-height:1">✕</button>
+                  </form>
+                </div>
+              </div>"""
 
         cards += f"""
         <div class="card" style="padding:10px 12px;font-size:12px">
           <div style="font-weight:700;margin-bottom:6px;font-size:13px">{server_label(srv)}</div>
-          <table style="font-size:12px;table-layout:fixed">
-            <tr><th style="padding:3px">Объект</th><th style="padding:3px">PD</th><th style="padding:3px">Итог</th><th style="padding:3px"></th></tr>
-            {rows}
-          </table>
+          {rows}
         </div>"""
 
     grid = f"""
