@@ -737,8 +737,6 @@ NAV_SCRIPT = """
   window.addEventListener('popstate', function(){
     go(window.location.href, {}, false);
   });
-
-  window.__adminGo = go;
 })();
 </script>
 """
@@ -2259,40 +2257,6 @@ def _realtor_tabs(active_view):
     </div>
     """
 
-def _auto_refresh_widget(interval_sec=6):
-    """Маленький переключатель + скрипт: пока включено, страница сама
-    подтягивает свежие данные каждые interval_sec секунд через тот же
-    AJAX-механизм, что и обычная навигация (без полной перезагрузки и
-    без сброса скролла). Нужно, чтобы во время сканирования (бот шлёт
-    данные на /update) видеть актуальную картину, не нажимая F5 руками —
-    особенно полезно, если вдруг проскочит баг с задвоением на скане."""
-    return f"""
-    <div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;color:var(--muted);font-size:12px">
-      <label style="display:flex;align-items:center;gap:5px;cursor:pointer;user-select:none">
-        <input type="checkbox" id="autoRefreshToggle" checked style="width:auto;margin:0">
-        Автообновление ({interval_sec}с)
-      </label>
-      <span id="autoRefreshDot" style="width:7px;height:7px;border-radius:50%;background:var(--accent);transition:opacity .3s"></span>
-    </div>
-    <script>
-    (function(){{
-      if (window.__realtorAutoTimer) clearInterval(window.__realtorAutoTimer);
-      var dot = document.getElementById('autoRefreshDot');
-      var chk = document.getElementById('autoRefreshToggle');
-      function tick(){{
-        if (!chk || !chk.checked) return;
-        if (dot) {{ dot.style.opacity = '0.25'; setTimeout(function(){{ if (dot) dot.style.opacity = '1'; }}, 400); }}
-        if (typeof window.__adminGo === 'function') {{
-          window.__adminGo(window.location.href, {{}}, false);
-        }} else {{
-          window.location.reload();
-        }}
-      }}
-      window.__realtorAutoTimer = setInterval(tick, {interval_sec * 1000});
-    }})();
-    </script>
-    """
-
 def _render_snapshot_mode(t_param, allowed=None):
     sessions_index = db.reference("sessions_index").get() or []
     if not isinstance(sessions_index, list):
@@ -2303,7 +2267,7 @@ def _render_snapshot_mode(t_param, allowed=None):
         sessions_index = []
 
     if not sessions_index:
-        return _auto_refresh_widget() + '<div class="card">Пока нет ни одного скана. Отсканируйте хотя бы один сервер ботом — раунд появится здесь.</div>'
+        return '<div class="card">Пока нет ни одного скана. Отсканируйте хотя бы один сервер ботом — раунд появится здесь.</div>'
 
     selected_bucket = None
     if t_param:
@@ -2397,7 +2361,6 @@ def _render_snapshot_mode(t_param, allowed=None):
             </div>"""
 
     return f"""
-    {_auto_refresh_widget()}
     <div class="card" style="margin-bottom:14px">
       <div style="color:var(--muted);font-size:13px;margin-bottom:8px">Раунд сканирования (доступны только часы, когда реально что-то сканировали):</div>
       {time_buttons}
@@ -2519,7 +2482,7 @@ def _render_compare_mode(a_param, b_param, allowed=None, srv_param=""):
         sessions_index = []
 
     if len(sessions_index) < 2:
-        return _auto_refresh_widget() + '<div class="card">Нужно как минимум 2 сохранённых скана-часа для сравнения. Пока доступно: ' + str(len(sessions_index)) + '.</div>'
+        return '<div class="card">Нужно как минимум 2 сохранённых скана-часа для сравнения. Пока доступно: ' + str(len(sessions_index)) + '.</div>'
 
     # sessions_index хранит максимум 3 последних часа-раунда (см. auto_cleanup),
     # поэтому не страшно вытянуть данные по всем сразу — это максимум 3 запроса.
@@ -2588,7 +2551,6 @@ def _render_compare_mode(a_param, b_param, allowed=None, srv_param=""):
         return pills
 
     picker = f"""
-    {_auto_refresh_widget()}
     <div class="card" style="margin-bottom:14px">
       <div style="color:var(--muted);font-size:13px;margin-bottom:6px">Сервер:</div>
       <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:14px">{srv_pills}</div>
