@@ -2624,6 +2624,7 @@ def _render_compare_mode(a_param, b_param, allowed=None, srv_param=""):
                         <input type="hidden" name="a" value="{bucket_a}">
                         <input type="hidden" name="b" value="{bucket_b}">
                         <input type="hidden" name="srv" value="{selected_srv}">
+                        <input type="hidden" name="bucket" value="{bucket}">
                         <button type="submit" class="danger" title="Удалить" style="padding:2px 5px;font-size:10px;line-height:1">✕</button>
                       </form>
                     </div>
@@ -2708,8 +2709,37 @@ def admin_realtor_delete(server, key):
         flash_msg("err", "У вас нет доступа к этому серверу")
         return redirect(url_for("admin_realtor"))
 
+    view = request.form.get("view", "snapshot")
+
+    # Всегда убираем из "живого" списка (properties) — это то, что видно на
+    # главной странице "Слёты" и что использует автоопределение страховки.
     db.reference(f"properties/{server}/{key}").delete()
-    db.reference(f"history/{server}/{key}").delete()
+
+    # Раньше отсюда ВСЕГДА удиралась и вся history/{server}/{key} — из-за
+    # этого чистка дублей в "Снэпшотах"/"Сравнении" попутно стирала историю
+    # сканов по этой позиции, и раздел "История" пустел без видимой причины.
+    # Теперь трогаем history только когда удаление реально инициировано из
+    # вкладки "История" — там это ожидаемое поведение (там и данные оттуда
+    # же читаются).
+    if view == "history":
+        db.reference(f"history/{server}/{key}").delete()
+    else:
+        # А "Снэпшоты"/"Сравнение" рендерятся из sessions/{bucket}/{server},
+        # а не из properties — раньше удаление никак её не трогало, поэтому
+        # дом просто оставался на экране после нажатия ✕, хотя из properties
+        # он уже пропадал. Чистим именно тот скан-час, из которого нажали ✕.
+        if view == "compare":
+            bucket = request.form.get("bucket", "")
+        else:
+            bucket = request.form.get("t", "")
+        if bucket:
+            try:
+                bucket_int = int(bucket)
+            except (TypeError, ValueError):
+                bucket_int = None
+            if bucket_int is not None:
+                db.reference(f"sessions/{bucket_int}/{server}/{key}").delete()
+
     flash_msg("ok", "Дом убран из списка")
     return redirect(_realtor_redirect_url())
 
