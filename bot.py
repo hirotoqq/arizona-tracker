@@ -646,6 +646,42 @@ async def cmd_key(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Неверный ключ. Проверь и попробуй ещё раз:\n`/key ТВОЙ-КЛЮЧ`", parse_mode="Markdown")
 
+async def cmd_delestate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/delestate <Сервер> — убрать сервер из кнопки '🏡 Дома с поместьями'
+    (например, если добавили с опечаткой)."""
+    chat_id = update.effective_chat.id
+    if chat_id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return
+    full_text = update.message.text
+    idx = full_text.find(" ")
+    if idx == -1:
+        await update.message.reply_text("Использование:\n/delestate <Сервер>")
+        return
+    server = full_text[idx+1:].strip()
+    if not db.reference(f"estates/{server}").get():
+        await update.message.reply_text(f"У сервера {server} и так ничего не настроено.")
+        return
+    db.reference(f"estates/{server}").delete()
+    await update.message.reply_text(f"🗑 Убрано: {server}")
+
+async def cmd_estates(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/estates — список серверов, уже настроенных в '🏡 Дома с поместьями'."""
+    chat_id = update.effective_chat.id
+    if chat_id != ADMIN_ID:
+        await update.message.reply_text("❌ Нет доступа.")
+        return
+    estates = db.reference("estates").get(shallow=True) or {}
+    if not estates:
+        await update.message.reply_text("Пока ничего не добавлено.\nДобавить: фото с подписью /setestate <Сервер> <текст>")
+        return
+    lines = "\n".join(f"• {s}" for s in sorted(estates))
+    await update.message.reply_text(
+        f"🏡 Настроено ({len(estates)}):\n{lines}\n\n"
+        "Добавить/обновить: фото с подписью /setestate <Сервер> <текст>\n"
+        "Убрать: /delestate <Сервер>"
+    )
+
 async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != ADMIN_ID:
         await update.message.reply_text("❌ Нет доступа.")
@@ -796,7 +832,11 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     боту ФОТО с подписью вида '/setestate <Сервер> <текст сообщения>'.
     Текст и file_id картинки сохраняются в Firebase (estates/{server}) —
     именно их бот присылает пользователю одним сообщением при выборе
-    этого сервера в show_estates_menu / cb_handler (estate_<server>)."""
+    этого сервера в show_estates_menu / cb_handler (estate_<server>).
+
+    <Сервер> может быть ЛЮБЫМ названием, не обязательно из SERVER_ORDER —
+    так админ сам добавляет новые пункты в это меню, список кнопок в
+    show_estates_menu строится из того, что реально есть в Firebase."""
     chat_id = update.effective_chat.id
     if chat_id != ADMIN_ID:
         return
@@ -807,13 +847,10 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(parts) < 2:
         await update.message.reply_text(
             "Использование (подпись к фото):\n/setestate <Сервер> <текст сообщения>\n\n"
-            f"Доступные сервера: {', '.join(SERVER_ORDER)}"
+            "Название сервера может быть любым — просто как оно должно называться в кнопке."
         )
         return
-    server = parts[1]
-    if server not in SERVER_ORDER:
-        await update.message.reply_text(f"Неизвестный сервер: {server}\nДоступные: {', '.join(SERVER_ORDER)}")
-        return
+    server  = parts[1]
     text    = parts[2] if len(parts) > 2 else ""
     file_id = update.message.photo[-1].file_id  # последний элемент — самое большое разрешение
     db.reference(f"estates/{server}").set({"file_id": file_id, "text": text})
@@ -913,9 +950,26 @@ async def show_filter_menu(update, ctx):
 async def show_estates_menu(update, ctx):
     """Кнопка «🏡 Дома с поместьями»: список серверов, по нажатию на сервер
     приходит ОДНО сообщение — картинка + текст, свои для каждого сервера
-    (задаются админом командой /setestate, см. handle_photo)."""
+    (задаются админом командой /setestate, см. handle_photo).
+
+    Список серверов здесь НЕ привязан к SERVER_ORDER — админ может добавить
+    вообще любой сервер (даже не из основного списка), просто отправив фото
+    с подписью /setestate. Кнопки строятся из того, что реально сохранено
+    в Firebase (estates/), а не из жёстко заданного списка."""
+    estates = db.reference("estates").get(shallow=True) or {}
+    servers = [s for s in SERVER_ORDER if s in estates] + \
+              sorted(s for s in estates if s not in SERVER_ORDER)
+
+    if not servers:
+        txt = "🏡 *Дома с поместьями*\n\nПока ничего не добавлено. Обратись к администратору."
+        if update.message:
+            await update.message.reply_text(txt, parse_mode="Markdown")
+        else:
+            await update.callback_query.edit_message_text(txt, parse_mode="Markdown")
+        return
+
     buttons, row = [], []
-    for s in SERVER_ORDER:
+    for s in servers:
         row.append(InlineKeyboardButton(s, callback_data=f"estate_{s}"))
         if len(row) == 2:
             buttons.append(row); row = []
@@ -1475,6 +1529,8 @@ def main():
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("key",       cmd_key))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    app.add_handler(CommandHandler("delestate", cmd_delestate))
+    app.add_handler(CommandHandler("estates",   cmd_estates))
     app.add_handler(CallbackQueryHandler(cb_handler))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
