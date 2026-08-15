@@ -206,6 +206,63 @@ def load_users():
     # Дедупликация — все ID как строки
     return set(str(k) for k in data.keys())
 
+def load_notify_prefs():
+    """Раньше subscribers/user_notify_minutes/lottery_*/season_subscribers/
+    favorite_servers были ЧИСТО в памяти — при каждом рестарте бота (деплой,
+    краш, конфликт getUpdates и т.п.) они обнулялись, и людям приходилось
+    заново включать уведомления. Теперь всё это лежит в Firebase под
+    notify_prefs/{chat_id} и подтягивается сюда при старте."""
+    global subscribers, user_notify_minutes, lottery_subscribers, lottery_notify_mins
+    global season_subscribers, favorite_servers
+    data = db.reference("notify_prefs").get() or {}
+    subs, mins, lot_subs, lot_mins, seas_subs, favs = set(), {}, set(), {}, set(), {}
+    for k, v in data.items():
+        if not isinstance(v, dict):
+            continue
+        try:
+            chat_id = int(k)
+        except (TypeError, ValueError):
+            continue
+        if v.get("subscribed"):
+            subs.add(chat_id)
+        m = v.get("minutes")
+        if isinstance(m, list) and m:
+            mins[chat_id] = set(int(x) for x in m)
+        if v.get("lottery_subscribed"):
+            lot_subs.add(chat_id)
+        lm = v.get("lottery_minutes")
+        if isinstance(lm, list) and lm:
+            lot_mins[chat_id] = set(int(x) for x in lm)
+        if v.get("season_subscribed"):
+            seas_subs.add(chat_id)
+        fv = v.get("favorites")
+        if isinstance(fv, list) and fv:
+            favs[chat_id] = set(fv)
+    subscribers          = subs
+    user_notify_minutes  = mins
+    lottery_subscribers  = lot_subs
+    lottery_notify_mins  = lot_mins
+    season_subscribers   = seas_subs
+    favorite_servers     = favs
+    return len(subs), len(lot_subs), len(seas_subs), len(favs)
+
+def save_notify_prefs(chat_id):
+    """Сохраняет ТЕКУЩЕЕ состояние всех настроек уведомлений одного chat_id
+    одним запросом (вызывается после любого toggle) — см. load_notify_prefs."""
+    chat_id = int(chat_id)
+    payload = {
+        "subscribed":         chat_id in subscribers,
+        "minutes":            sorted(user_notify_minutes.get(chat_id, set())),
+        "lottery_subscribed": chat_id in lottery_subscribers,
+        "lottery_minutes":    sorted(lottery_notify_mins.get(chat_id, set())),
+        "season_subscribed":  chat_id in season_subscribers,
+        "favorites":          sorted(favorite_servers.get(chat_id, set())),
+    }
+    try:
+        db.reference(f"notify_prefs/{chat_id}").set(payload)
+    except Exception as e:
+        print(f"[notify_prefs] Ошибка сохранения для {chat_id}: {e}")
+
 def save_user(chat_id, user=None):
     now_msk = datetime.now(tz=MSK).strftime("%d.%m.%Y %H:%M МСК")
     data = {
@@ -220,22 +277,31 @@ def save_user(chat_id, user=None):
     db.reference(f"users/{chat_id}").set(data)
 
 def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
-    """PD на текущий момент: убывает на d_val за каждый прошедший час с
-    момента скана (1/час для застрахованных, 2/час для незастрахованных),
-    но не ниже порога слёта (drop_at). Час рестарта сервера (05:00–06:00
-    МСК) не считается — в это время PD не падает."""
+    """PD на текущий момент: убывает на d_val на каждой КРУГЛОЙ границе часа
+    (00 минут) с момента скана (1/час для застрахованных, 2/час для
+    незастрахованных), но не ниже порога слёта (drop_at). Час рестарта
+    сервера (05:00–06:00 МСК) не считается — в это время PD не падает.
+
+    Раньше списание отсчитывалось от самого scan_ts шагами по 3600 секунд —
+    то есть если скан пришёл в 14:35, списания происходили в 15:35, 16:35 и
+    т.д., а не в 15:00/16:00 как должно быть по игре. Теперь считаем именно
+    круглые часовые границы."""
     if now is None:
         now = int(time.time())
     floor_val = drop_at if drop_at is not None else 0
     if not scan_ts:
         return max(pd, floor_val)
     scan_ts = int(scan_ts)
+
+    scan_dt   = datetime.fromtimestamp(scan_ts, tz=MSK)
+    next_hour = scan_dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+    ts = int(next_hour.timestamp())
+
     elapsed_hours = 0
-    ts = scan_ts
-    while ts + 3600 <= now:
-        ts += 3600
+    while ts <= now:
         if datetime.fromtimestamp(ts, tz=MSK).hour != 5:
             elapsed_hours += 1
+        ts += 3600
     current = pd - d_val * elapsed_hours
     return max(current, floor_val)
 
@@ -462,6 +528,7 @@ def permanent_keyboard():
         [KeyboardButton("🗺 По серверу"),    KeyboardButton("⭐️ Избранное")],
         [KeyboardButton("🔔 Уведомления"),   KeyboardButton("🎰 Лотерея")],
         [KeyboardButton("📜 История"),       KeyboardButton("🏆 Сезоны")],
+        [KeyboardButton("🏡 Дома с поместьями")],
         [KeyboardButton("👤 Профиль")],
     ], resize_keyboard=True, is_persistent=True)
 
@@ -549,7 +616,8 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🏆 *Сезоны* — таблица сезонов на неделю\n"
         "🔔 *Уведомления* — настрой оповещения о слётах\n"
         "🎰 *Лотерея* — напоминание о билетах в 21:10 МСК\n"
-        f"📜 *История* — слёты за последние {HISTORY_HOURS}ч\n\n"
+        f"📜 *История* — слёты за последние {HISTORY_HOURS}ч\n"
+        "🏡 *Дома с поместьями* — картинка и описание по серверу\n\n"
         "👨‍💻 Разработчик: @hirotoqq"
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=permanent_keyboard())
@@ -723,6 +791,34 @@ async def cmd_banlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lines.append(f"{i}. `{uid}`\n   Причина: {reason}\n   Дата: {date}")
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
+async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Админ настраивает контент для кнопки '🏡 Дома с поместьями': отправляет
+    боту ФОТО с подписью вида '/setestate <Сервер> <текст сообщения>'.
+    Текст и file_id картинки сохраняются в Firebase (estates/{server}) —
+    именно их бот присылает пользователю одним сообщением при выборе
+    этого сервера в show_estates_menu / cb_handler (estate_<server>)."""
+    chat_id = update.effective_chat.id
+    if chat_id != ADMIN_ID:
+        return
+    caption = update.message.caption or ""
+    if not caption.startswith("/setestate"):
+        return
+    parts = caption.split(maxsplit=2)
+    if len(parts) < 2:
+        await update.message.reply_text(
+            "Использование (подпись к фото):\n/setestate <Сервер> <текст сообщения>\n\n"
+            f"Доступные сервера: {', '.join(SERVER_ORDER)}"
+        )
+        return
+    server = parts[1]
+    if server not in SERVER_ORDER:
+        await update.message.reply_text(f"Неизвестный сервер: {server}\nДоступные: {', '.join(SERVER_ORDER)}")
+        return
+    text    = parts[2] if len(parts) > 2 else ""
+    file_id = update.message.photo[-1].file_id  # последний элемент — самое большое разрешение
+    db.reference(f"estates/{server}").set({"file_id": file_id, "text": text})
+    await update.message.reply_text(f"✅ Сохранено для {server}")
+
 async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if is_banned(chat_id):
@@ -759,6 +855,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif t == "🎰 Лотерея":           await show_lottery_menu(update, ctx)
     elif t == "📜 История":           await show_history(update, ctx)
     elif t == "🏆 Сезоны":            await show_seasons(update, ctx)
+    elif t == "🏡 Дома с поместьями": await show_estates_menu(update, ctx)
 
 # ── Показ списков ─────────────────────────────────────────
 async def show_list(update, ctx, page=0):
@@ -812,6 +909,23 @@ async def show_filter_menu(update, ctx):
         await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
     else:
         await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+async def show_estates_menu(update, ctx):
+    """Кнопка «🏡 Дома с поместьями»: список серверов, по нажатию на сервер
+    приходит ОДНО сообщение — картинка + текст, свои для каждого сервера
+    (задаются админом командой /setestate, см. handle_photo)."""
+    buttons, row = [], []
+    for s in SERVER_ORDER:
+        row.append(InlineKeyboardButton(s, callback_data=f"estate_{s}"))
+        if len(row) == 2:
+            buttons.append(row); row = []
+    if row: buttons.append(row)
+    txt = "🏡 *Дома с поместьями*\n\nВыбери сервер:"
+    kb  = InlineKeyboardMarkup(buttons)
+    if update.message:
+        await update.message.reply_text(txt, parse_mode="Markdown", reply_markup=kb)
+    else:
+        await update.callback_query.edit_message_text(txt, parse_mode="Markdown", reply_markup=kb)
 
 async def show_servers(update, ctx):
     summary = get_servers_summary()
@@ -1024,6 +1138,24 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_favorites(update, ctx, page=int(data.split("_")[-1]))
     elif data == "action_servers":
         await show_servers(update, ctx)
+
+    elif data.startswith("estate_"):
+        server = data.replace("estate_", "")
+        info   = db.reference(f"estates/{server}").get()
+        if not isinstance(info, dict) or not info.get("file_id"):
+            await ctx.bot.send_message(chat_id, f"Пока нет данных по серверу {server}.")
+        else:
+            try:
+                await ctx.bot.send_photo(
+                    chat_id, photo=info["file_id"],
+                    caption=info.get("text") or "",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                # На случай если caption с Markdown-разметкой некорректен —
+                # шлём тем же файлом, но без parse_mode, лишь бы дошло.
+                await ctx.bot.send_photo(chat_id, photo=info["file_id"], caption=info.get("text") or "")
+
     elif data == "open_notify":
         await show_notify_menu(update, ctx)
     elif data == "open_lottery":
@@ -1037,6 +1169,7 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         favs   = favorite_servers.setdefault(chat_id, set())
         if server in favs: favs.discard(server)
         else: favs.add(server)
+        save_notify_prefs(chat_id)
         # Обновляем кнопки
         servers = SERVER_ORDER
         buttons, row = [], []
@@ -1055,9 +1188,11 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "season_notify_toggle":
         if chat_id in season_subscribers:
             season_subscribers.discard(chat_id)
+            save_notify_prefs(chat_id)
             await query.answer("🔕 Отписался от смены сезона")
         else:
             season_subscribers.add(chat_id)
+            save_notify_prefs(chat_id)
             await query.answer("🔔 Подписался на смену сезона")
         await show_seasons(update, ctx)
 
@@ -1124,6 +1259,7 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif data == "action_notify_toggle":
         if chat_id in subscribers: subscribers.discard(chat_id)
         else: subscribers.add(chat_id)
+        save_notify_prefs(chat_id)
         await show_notify_menu(update, ctx)
 
     elif data.startswith("notify_min_"):
@@ -1131,11 +1267,13 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         s = user_notify_minutes.setdefault(chat_id, set())
         if m in s: s.discard(m)
         else: s.add(m)
+        save_notify_prefs(chat_id)
         await show_notify_menu(update, ctx)
 
     elif data == "action_lottery_toggle":
         if chat_id in lottery_subscribers: lottery_subscribers.discard(chat_id)
         else: lottery_subscribers.add(chat_id)
+        save_notify_prefs(chat_id)
         await show_lottery_menu(update, ctx)
 
     elif data.startswith("lottery_min_"):
@@ -1143,6 +1281,7 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         s = lottery_notify_mins.setdefault(chat_id, set())
         if m in s: s.discard(m)
         else: s.add(m)
+        save_notify_prefs(chat_id)
         await show_lottery_menu(update, ctx)
 
 # ── Фоновые задачи ────────────────────────────────────────
@@ -1328,13 +1467,16 @@ def main():
     banned_users  = load_banned()
     subscriptions = load_subscriptions()
     _subscription_required = load_subscription_required()
-    print(f"Загружено пользователей: {len(all_users)}, активных ключей: {len(subscriptions)}")
+    n_sub, n_lot, n_seas, n_fav = load_notify_prefs()
+    print(f"Загружено пользователей: {len(all_users)}, активных ключей: {len(subscriptions)}, "
+          f"подписчиков на уведомления: {n_sub}, лотерею: {n_lot}, сезон: {n_seas}, с избранным: {n_fav}")
 
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("key",       cmd_key))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CallbackQueryHandler(cb_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CommandHandler("ban",      cmd_ban))
     app.add_handler(CommandHandler("unban",    cmd_unban))

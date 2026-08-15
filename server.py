@@ -147,22 +147,31 @@ def infer_insured(v):
     return True
 
 def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
-    """PD на текущий момент: убывает на d_val за каждый прошедший час с
-    момента скана, но не ниже порога слёта (drop_at). Час рестарта сервера
-    (05:00–06:00 МСК) не считается — в это время PD не падает."""
+    """PD на текущий момент: убывает на d_val на каждой КРУГЛОЙ границе часа
+    (00 минут МСК) с момента скана, но не ниже порога слёта (drop_at). Час
+    рестарта сервера (05:00–06:00 МСК) не считается — в это время PD не
+    падает.
+
+    Раньше списание отсчитывалось от самого scan_ts шагами по 3600 секунд —
+    то есть если скан пришёл в 14:35, списания происходили в 15:35, 16:35 и
+    т.д., а не в 15:00/16:00 как должно быть по игре. Теперь считаем именно
+    круглые часовые границы (синхронно с той же логикой в bot.py)."""
     if now is None:
         now = int(time.time())
     floor_val = drop_at if drop_at is not None else 0
     if not scan_ts:
         return max(pd, floor_val)
     scan_ts = int(scan_ts)
+
+    scan_msk = scan_ts + MSK_OFFSET
+    ts = ((scan_msk // 3600) + 1) * 3600 - MSK_OFFSET  # ближайшая круглая граница часа МСК после скана
+
     elapsed_hours = 0
-    ts = scan_ts
-    while ts + 3600 <= now:
-        ts += 3600
+    while ts <= now:
         hour_msk = (ts + MSK_OFFSET) // 3600 % 24
         if hour_msk != 5:
             elapsed_hours += 1
+        ts += 3600
     current = pd - d_val * elapsed_hours
     return max(current, floor_val)
 
@@ -286,6 +295,7 @@ def update():
             db.reference(f"sessions/{old_bucket}").delete()
         db.reference("sessions_index").set(sessions_index)
     session_writes = {}
+    history_writes = {}
 
     excluded_ids = set(db.reference(f"exceptions/{server}").get(shallow=True) or {})
 
@@ -462,25 +472,34 @@ def update():
         }
 
         # Для "Риелторки" → режим "История": для домов без ID отдельно
-        # копим неограниченную (30 дней) историю сканов по каждой позиции —
-        # чтобы можно было сравнить любые два произвольных скана, а не только
-        # соседние часовые окна.
+        # копим историю сканов по каждой позиции (48ч) — чтобы можно было
+        # сравнить любые два произвольных скана, а не только соседние
+        # часовые окна.
+        #
+        # Раньше здесь на КАЖДУЮ запись без ID синхронно делался ещё и
+        # .get() ВСЕЙ истории по ключу + цикл .delete() старых записей —
+        # при скане из 14+ домов это было 14+ полных чтений/удалений
+        # подряд одно за другим. Из-за этого /update иногда не укладывался
+        # в 5-секундный таймаут клиента и просто "зависал" без ответа —
+        # клиент не понимал, дошло ли вообще что-то до сервера, а
+        # "История" из-за этого выглядела так, будто ничего не
+        # сохраняется. Очистка старых записей и так уже происходит при
+        # каждом открытии "Истории" (см. _render_history_mode) — здесь
+        # оставляем только лёгкую запись, без чтения и удаления.
         if not prop_id:
-            db.reference(f"history/{server}/{key}/{now}").set({"pd": pd})
-            hist = db.reference(f"history/{server}/{key}").get() or {}
-            if isinstance(hist, dict):
-                cutoff = now - HISTORY_RETENTION_SECONDS
-                for ts_str in list(hist.keys()):
-                    try:
-                        if int(ts_str) < cutoff:
-                            db.reference(f"history/{server}/{key}/{ts_str}").delete()
-                    except ValueError:
-                        continue
+            history_writes[f"{key}/{now}"] = {"pd": pd}
 
     ref.set(kept)
     if session_writes:
         db.reference(f"sessions/{hour_bucket}/{server}").update(session_writes)
+    if history_writes:
+        # Один запрос с составными ("a/b") ключами вместо запроса на
+        # каждую позицию по отдельности — Firebase Admin SDK трактует
+        # такие ключи как multi-path patch update.
+        db.reference(f"history/{server}").update(history_writes)
     return jsonify({"ok": True, "written": written})
+
+
 
 @app.route("/list", methods=["GET"])
 def list_props():
@@ -2424,34 +2443,31 @@ def _render_history_mode(allowed=None):
                 insured_flag = infer_insured(current) if isinstance(current, dict) else None
                 shield_on  = "background:var(--accent);color:#0d0f14;border-color:var(--accent)" if insured_flag is True else ""
                 noentry_on = "background:var(--danger);color:#0d0f14;border-color:var(--danger)" if insured_flag is False else ""
-                rows += f"""<tr>
-                  <td style="padding:4px 3px;white-space:nowrap">{pos_label}. {icon} {format_msk(ts, "%d.%m %H:%M")}</td>
-                  <td style="padding:4px 3px;white-space:nowrap"><span class="pill bad" style="font-size:10px;padding:1px 6px">{pd_val} PD</span></td>
-                  <td style="padding:4px 3px;white-space:nowrap;text-align:right">
-                    <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
-                      <input type="hidden" name="view" value="history">
-                      <input type="hidden" name="insured" value="1">
-                      <button type="submit" class="ghost" title="Застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{shield_on}">🛡</button>
-                    </form>
-                    <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
-                      <input type="hidden" name="view" value="history">
-                      <input type="hidden" name="insured" value="0">
-                      <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
-                    </form>
-                    <form class="inline" method="post" action="{url_for('admin_realtor_delete', server=srv, key=key)}" onsubmit="return confirm('Убрать этот дом из списка?')">
-                      <input type="hidden" name="view" value="history">
-                      <button type="submit" class="danger" title="Удалить" style="padding:2px 5px;font-size:10px;line-height:1">✕</button>
-                    </form>
-                  </td>
-                </tr>"""
+                rows += f"""<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 3px;border-bottom:1px solid var(--border)">
+                    <div style="min-width:0;flex:1 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{pos_label}. {icon} {format_msk(ts, "%d.%m %H:%M")}</div>
+                    <div style="flex:0 0 auto"><span class="pill bad" style="font-size:10px;padding:1px 6px">{pd_val} PD</span></div>
+                    <div style="display:flex;gap:3px;flex:0 0 auto">
+                      <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                        <input type="hidden" name="view" value="history">
+                        <input type="hidden" name="insured" value="1">
+                        <button type="submit" class="ghost" title="Застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{shield_on}">🛡</button>
+                      </form>
+                      <form class="inline" method="post" action="{url_for('admin_realtor_set_insured', server=srv, key=key)}">
+                        <input type="hidden" name="view" value="history">
+                        <input type="hidden" name="insured" value="0">
+                        <button type="submit" class="ghost" title="Не застрахован" style="padding:2px 5px;font-size:10px;line-height:1;{noentry_on}">🚫</button>
+                      </form>
+                      <form class="inline" method="post" action="{url_for('admin_realtor_delete', server=srv, key=key)}" onsubmit="return confirm('Убрать этот дом из списка?')">
+                        <input type="hidden" name="view" value="history">
+                        <button type="submit" class="danger" title="Удалить" style="padding:2px 5px;font-size:10px;line-height:1">✕</button>
+                      </form>
+                    </div>
+                  </div>"""
 
             cards += f"""
             <div class="card" style="padding:10px 12px;font-size:12px">
               <div style="font-weight:700;margin-bottom:6px;font-size:13px">{server_label(srv)} <span style="color:var(--muted);font-weight:normal">({len(events)})</span></div>
-              <table style="font-size:12px;table-layout:fixed">
-                <tr><th style="padding:3px">Скан</th><th style="padding:3px">PD</th><th style="padding:3px"></th></tr>
-                {rows}
-              </table>
+              {rows}
             </div>"""
 
     intro = """
