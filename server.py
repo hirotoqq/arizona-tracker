@@ -767,7 +767,7 @@ def render_page(title, active, body):
         nav_items = [
             ("dashboard", "Дашборд"), ("keys", "Ключи"), ("users", "Пользователи"),
             ("properties", "Слёты"), ("expired", "Истёкшие"), ("settings", "Настройки"),
-            ("editors", "Редакторы"), ("realtor", "Риелторка"), ("broadcast", "Рассылка"),
+            ("editors", "Редакторы"), ("realtor", "Риелторка"), ("estates", "Поместья"), ("broadcast", "Рассылка"),
         ]
     nav = "".join(
         f'<a href="{url_for("admin_"+ep)}" class="{"active" if active==ep else ""}">{label}</a>'
@@ -2255,6 +2255,97 @@ def admin_editor_delete(eid):
     db.reference(f"editors/{eid}").delete()
     flash_msg("ok", "Редактор удалён")
     return redirect(url_for("admin_editors"))
+
+# ── Поместья: порядок серверов в кнопке бота "🏡 Дома с поместьями".
+#   Сам контент (картинка+текст) задаётся из телеграм-бота командой
+#   /setestate — здесь только порядок, в котором сервера показываются
+#   в виде кнопок пользователю.
+def _get_estates_ordered():
+    """Сервера, у которых есть контент (estates/), в текущем порядке
+    показа (estates_order), новые/ещё не упорядоченные — в конце."""
+    estates = db.reference("estates").get(shallow=True) or {}
+    order = db.reference("estates_order").get() or []
+    if not isinstance(order, list):
+        order = []
+    ordered = [s for s in order if s in estates]
+    ordered += [s for s in sorted(estates) if s not in ordered]
+    return ordered
+
+@app.route("/admin/estates")
+@admin_only
+def admin_estates():
+    servers = _get_estates_ordered()
+
+    rows = ""
+    for i, s in enumerate(servers):
+        up_dis   = "disabled" if i == 0 else ""
+        down_dis = "disabled" if i == len(servers) - 1 else ""
+        rows += f"""
+        <tr>
+          <td class="mono">{i + 1}</td>
+          <td>{s}</td>
+          <td class="row">
+            <form class="inline" method="post" action="{url_for('admin_estates_move')}">
+              <input type="hidden" name="server" value="{s}">
+              <input type="hidden" name="dir" value="up">
+              <button class="ghost" type="submit" {up_dis}>⬆️</button>
+            </form>
+            <form class="inline" method="post" action="{url_for('admin_estates_move')}">
+              <input type="hidden" name="server" value="{s}">
+              <input type="hidden" name="dir" value="down">
+              <button class="ghost" type="submit" {down_dis}>⬇️</button>
+            </form>
+            <form class="inline" method="post" action="{url_for('admin_estates_remove')}" onsubmit="return confirm('Убрать «{s}» из кнопки «Дома с поместьями»?')">
+              <input type="hidden" name="server" value="{s}">
+              <button class="danger" type="submit">Убрать</button>
+            </form>
+          </td>
+        </tr>"""
+
+    body = f"""
+    <h1>Поместья</h1>
+    <div class="card" style="margin-bottom:14px">
+      <p style="color:var(--muted);margin:0">
+        Порядок серверов в кнопке бота «🏡 Дома с поместьями». Картинка и текст
+        для каждого сервера задаются из телеграм-бота командой <code>/setestate</code> —
+        здесь можно только менять порядок или убрать сервер из списка.
+      </p>
+    </div>
+    <table>
+      <tr><th>#</th><th>Сервер</th><th></th></tr>
+      {rows or "<tr><td colspan='3'>Пока ни один сервер не настроен — задайте контент через /setestate в боте.</td></tr>"}
+    </table>
+    """
+    return render_page("Поместья", "estates", body)
+
+@app.route("/admin/estates/move", methods=["POST"])
+@admin_only
+def admin_estates_move():
+    server    = request.form.get("server", "")
+    direction = request.form.get("dir", "")
+    servers   = _get_estates_ordered()
+    if server not in servers:
+        flash_msg("err", "Сервер не найден")
+        return redirect(url_for("admin_estates"))
+
+    idx = servers.index(server)
+    if direction == "up" and idx > 0:
+        servers[idx - 1], servers[idx] = servers[idx], servers[idx - 1]
+    elif direction == "down" and idx < len(servers) - 1:
+        servers[idx + 1], servers[idx] = servers[idx], servers[idx + 1]
+
+    db.reference("estates_order").set(servers)
+    return redirect(url_for("admin_estates"))
+
+@app.route("/admin/estates/remove", methods=["POST"])
+@admin_only
+def admin_estates_remove():
+    server = request.form.get("server", "")
+    db.reference(f"estates/{server}").delete()
+    servers = [s for s in _get_estates_ordered() if s != server]
+    db.reference("estates_order").set(servers)
+    flash_msg("ok", f"«{server}» убран из «Дома с поместьями»")
+    return redirect(url_for("admin_estates"))
 
 # ── Риелторка: 2 режима — "Снэпшоты" (последние 3 часа-скана, все
 #   сервера сеткой, как раунд обхода) и "История" (для домов без ID —

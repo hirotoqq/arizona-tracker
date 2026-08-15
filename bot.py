@@ -663,6 +663,9 @@ async def cmd_delestate(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"У сервера {server} и так ничего не настроено.")
         return
     db.reference(f"estates/{server}").delete()
+    order = db.reference("estates_order").get() or []
+    if isinstance(order, list) and server in order:
+        db.reference("estates_order").set([s for s in order if s != server])
     await update.message.reply_text(f"🗑 Убрано: {server}")
 
 async def cmd_estates(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -955,10 +958,15 @@ async def show_estates_menu(update, ctx):
     Список серверов здесь НЕ привязан к SERVER_ORDER — админ может добавить
     вообще любой сервер (даже не из основного списка), просто отправив фото
     с подписью /setestate. Кнопки строятся из того, что реально сохранено
-    в Firebase (estates/), а не из жёстко заданного списка."""
+    в Firebase (estates/). Порядок показа — из estates_order (задаётся на
+    сайте, раздел «Поместья»); всё, что туда ещё не попало, добавляется
+    в конец по алфавиту."""
     estates = db.reference("estates").get(shallow=True) or {}
-    servers = [s for s in SERVER_ORDER if s in estates] + \
-              sorted(s for s in estates if s not in SERVER_ORDER)
+    order   = db.reference("estates_order").get() or []
+    if not isinstance(order, list):
+        order = []
+    servers = [s for s in order if s in estates]
+    servers += sorted(s for s in estates if s not in servers)
 
     if not servers:
         txt = "🏡 *Дома с поместьями*\n\nПока ничего не добавлено. Обратись к администратору."
