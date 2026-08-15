@@ -1083,20 +1083,31 @@ async def show_profile(update, ctx):
     selected   = user_notify_minutes.get(chat_id, set())
     lot_sel    = lottery_notify_mins.get(chat_id, set())
     favs       = favorite_servers.get(chat_id, set())
-    notify_str = ", ".join(f"{m}м" for m in sorted(selected)) if selected else "не настроено"
-    lot_str    = ", ".join(f"{m}м" for m in sorted(lot_sel)) if lot_sel else "не настроено"
-    fav_str    = ", ".join(sorted(favs)) if favs else "не выбраны"
     exp        = get_expiry(chat_id)
-    access_str = f"до {format_expiry(exp)}" if exp else "нет"
+    access_str = format_expiry(exp) if exp else "нет"
+
+    notify_str = "Вкл"
+    if is_sub and selected:
+        notify_str += f" ({', '.join(f'{m}м' for m in sorted(selected))})"
+    elif not is_sub:
+        notify_str = "Выкл"
+
+    lot_str = "Вкл"
+    if is_lot and lot_sel:
+        lot_str += f" ({', '.join(f'{m}м' for m in sorted(lot_sel))})"
+    elif not is_lot:
+        lot_str = "Выкл"
+
+    season_str = "Вкл" if is_season else "Выкл"
+    fav_str    = ", ".join(sorted(favs)) if favs else "не выбраны"
+
     text = (
         f"👤 *Профиль*\n\n"
-        f"🔑 Доступ: {access_str}\n\n"
-        f"🔔 Уведомления слётов: {'✅ Вкл' if is_sub else '❌ Выкл'}\n"
-        f"⏱ Предупреждать за: {notify_str}\n\n"
-        f"🎰 Уведомления лотереи: {'✅ Вкл' if is_lot else '❌ Выкл'}\n"
-        f"⏱ За: {lot_str}\n\n"
-        f"🏆 Уведомления о смене сезона: {'✅ Вкл' if is_season else '❌ Выкл'}\n\n"
-        f"⭐️ Избранные серверы:\n_{fav_str}_"
+        f"🔑 Доступ до: {access_str}\n"
+        f"🔔 Слёты: {notify_str}\n"
+        f"🎰 Лотерея: {lot_str}\n"
+        f"🏆 Сезон: {season_str}\n"
+        f"⭐️ Избранное: {fav_str}"
     )
     buttons = [
         [InlineKeyboardButton("🔔 Настроить уведомления", callback_data="open_notify")],
