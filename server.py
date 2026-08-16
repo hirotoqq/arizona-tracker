@@ -175,30 +175,46 @@ def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
     current = pd - d_val * elapsed_hours
     return max(current, floor_val)
 
+def _add_valid_hours(start_ts, n):
+    """Идём вперёд от start_ts по круглым часовым границам МСК (00 минут),
+    пропуская 05:00 (час рестарта сервера — PD в это время не падает), пока
+    не наберём n таких валидных границ — возвращает итоговый момент времени.
+
+    Это ТА ЖЕ логика обхода часовых границ, что и в compute_current_pd, только
+    в обратную сторону: там считаем, сколько валидных границ уже ПРОШЛО с
+    scan_ts до now, здесь — где окажемся, пройдя вперёд n валидных границ от
+    start_ts. Обе функции должны быть согласованы, иначе "Слёт" (эта функция)
+    и "PD (сейчас)" (compute_current_pd) начинают жить каждая по своим часам —
+    именно это раньше и происходило: "Слёт" считался по старой формуле
+    (now + N*3600, потом округление вниз до часа), которая не совпадала с
+    пошаговым обходом границ в compute_current_pd, из-за чего время слёта не
+    двигалось синхронно с реальным темпом падения PD."""
+    if n <= 0:
+        return start_ts
+    start_msk = start_ts + MSK_OFFSET
+    ts = ((start_msk // 3600) + 1) * 3600 - MSK_OFFSET  # ближайшая круглая граница часа МСК после start_ts
+    count = 0
+    while True:
+        hour_msk = (ts + MSK_OFFSET) // 3600 % 24
+        if hour_msk != 5:
+            count += 1
+            if count == n:
+                return ts
+        ts += 3600
+
 def calc_expiry_ts(pd, drop_at, now=None):
     if now is None:
         now = int(time.time())
-    hours_left  = max(pd - (drop_at - 1), 0)
-    future_utc  = now + hours_left * 3600
-    future_msk  = future_utc + MSK_OFFSET
-    future_msk -= future_msk % 3600
-    return future_msk - MSK_OFFSET
+    hours_left = max(pd - (drop_at - 1), 0)
+    return _add_valid_hours(now, hours_left)
 
 def calc_expiry_from_pdl(pd, d, l, now=None):
     if now is None:
         now = int(time.time())
     if d <= 0:
         d = 1
-    hours_left  = max((pd - l) // d + 1, 0)
-    future_utc  = now + hours_left * 3600
-    future_msk  = future_utc + MSK_OFFSET
-    future_msk -= future_msk % 3600
-    # В 05:00 МСК сервер уходит на рестарт — слёт в этот час не происходит,
-    # реально падает только в 06:00.
-    hour_of_day = (future_msk // 3600) % 24
-    if hour_of_day == 5:
-        future_msk += 3600
-    return future_msk - MSK_OFFSET
+    hours_left = max((pd - l) // d + 1, 0)
+    return _add_valid_hours(now, hours_left)
 
 KEY_ALPHABET  = string.ascii_uppercase + string.digits
 KEY_GROUP_LEN = 4
