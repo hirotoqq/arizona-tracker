@@ -148,9 +148,11 @@ def infer_insured(v):
 
 def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
     """PD на текущий момент: убывает на d_val на каждой КРУГЛОЙ границе часа
-    (00 минут МСК) с момента скана, но не ниже порога слёта (drop_at). Час
-    рестарта сервера (05:00–06:00 МСК) не считается — в это время PD не
-    падает.
+    (00 минут МСК) с момента скана — включая 05:00, PD списывается и в этот
+    час тоже. Особенность только в том, что сам слёт (объект реально
+    пропадает) в 05:00 не происходит из-за рестарта сервера — это
+    учитывается отдельно в _add_valid_hours при расчёте времени "Слёт",
+    здесь же просто честный подсчёт текущего PD.
 
     Раньше списание отсчитывалось от самого scan_ts шагами по 3600 секунд —
     то есть если скан пришёл в 14:35, списания происходили в 15:35, 16:35 и
@@ -168,44 +170,35 @@ def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
 
     elapsed_hours = 0
     while ts <= now:
-        hour_msk = (ts + MSK_OFFSET) // 3600 % 24
-        if hour_msk != 5:
-            elapsed_hours += 1
+        elapsed_hours += 1
         ts += 3600
     current = pd - d_val * elapsed_hours
     return max(current, floor_val)
 
 def _add_valid_hours(start_ts, n):
-    """Идём вперёд от start_ts по круглым часовым границам МСК (00 минут),
-    пропуская 05:00 (час рестарта сервера — PD в это время не падает), пока
-    не наберём n таких валидных границ — возвращает итоговый момент времени.
-
-    Это ТА ЖЕ логика обхода часовых границ, что и в compute_current_pd, только
-    в обратную сторону: там считаем, сколько валидных границ уже ПРОШЛО с
-    scan_ts до now, здесь — где окажемся, пройдя вперёд n валидных границ от
-    start_ts. Обе функции должны быть согласованы, иначе "Слёт" (эта функция)
-    и "PD (сейчас)" (compute_current_pd) начинают жить каждая по своим часам —
-    именно это раньше и происходило: "Слёт" считался по старой формуле
-    (now + N*3600, потом округление вниз до часа), которая не совпадала с
-    пошаговым обходом границ в compute_current_pd, из-за чего время слёта не
-    двигалось синхронно с реальным темпом падения PD."""
+    """Момент времени, когда PD дойдёт до порога слёта — n часовых списаний
+    (КАЖДЫЙ час, включая 05:00 — PD там тоже списывается) вперёд от
+    start_ts. Единственное исключение: если результат попадает ровно на
+    05:00 МСК, реального слёта в этот час не происходит (сервер уходит на
+    рестарт) — объект пропадает из списка только в 06:00, поэтому в этом
+    случае момент сдвигается на час вперёд. Сам PD при этом продолжает
+    считаться по обычным часам (см. compute_current_pd) — сдвигается
+    только момент фактического "слёта"."""
     if n <= 0:
         return start_ts
     start_msk = start_ts + MSK_OFFSET
     ts = ((start_msk // 3600) + 1) * 3600 - MSK_OFFSET  # ближайшая круглая граница часа МСК после start_ts
-    count = 0
-    while True:
-        hour_msk = (ts + MSK_OFFSET) // 3600 % 24
-        if hour_msk != 5:
-            count += 1
-            if count == n:
-                return ts
-        ts += 3600
+    ts += (n - 1) * 3600  # n-я по счёту круглая граница часа
+
+    hour_msk = (ts + MSK_OFFSET) // 3600 % 24
+    if hour_msk == 5:
+        ts += 3600  # слёта в 05:00 не бывает — реально в 06:00
+    return ts
 
 def calc_expiry_ts(pd, drop_at, now=None):
     if now is None:
         now = int(time.time())
-    hours_left = max(pd - (drop_at - 1), 0)
+    hours_left = max(pd - drop_at, 0)
     return _add_valid_hours(now, hours_left)
 
 def calc_expiry_from_pdl(pd, d, l, now=None):
@@ -213,7 +206,8 @@ def calc_expiry_from_pdl(pd, d, l, now=None):
         now = int(time.time())
     if d <= 0:
         d = 1
-    hours_left = max((pd - l) // d + 1, 0)
+    diff = pd - l
+    hours_left = max(-(-diff // d), 0) if diff > 0 else 0  # ceil(diff / d), сколько ровно часов нужно, без лишнего +1
     return _add_valid_hours(now, hours_left)
 
 KEY_ALPHABET  = string.ascii_uppercase + string.digits
