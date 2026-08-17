@@ -315,13 +315,13 @@ def update():
 
     excluded_ids = set(db.reference(f"exceptions/{server}").get(shallow=True) or {})
 
-    # Замороженные дома (Настройки → Замороженные дома): на некоторых
-    # серверах есть дома, у которых PD зафиксирован и никогда не падает.
-    # У них обычно нет отдельного ID, поэтому их нельзя исключить по ID —
-    # вместо этого задаётся "на сервере X застряло N домов с PD=Y", и мы
-    # пропускаем первые N встреченных домов с таким PD за скан, оставляя
-    # лишние (это реальные, не замороженные дома, просто оказавшиеся на
-    # том же PD в моменте).
+    # Замороженные объекты (Настройки → Замороженные): на некоторых
+    # серверах есть дома/бизнесы, у которых PD зафиксирован и никогда не
+    # падает. У них обычно нет отдельного ID, поэтому их нельзя исключить
+    # по ID — вместо этого задаётся "на сервере X застряло N домов/бизнесов
+    # с PD=Y", и мы пропускаем первые N встреченных объектов такого типа с
+    # таким PD за скан, оставляя лишние (это реальные, не замороженные
+    # объекты, просто оказавшиеся на том же PD в моменте).
     frozen_rules = db.reference(f"config/frozenHouses/{server}").get() or {}
     frozen_budget = {}
     if isinstance(frozen_rules, dict):
@@ -331,7 +331,11 @@ def update():
                     r_pd, r_count = int(rule.get("pd")), int(rule.get("count"))
                 except (TypeError, ValueError):
                     continue
-                frozen_budget[r_pd] = frozen_budget.get(r_pd, 0) + r_count
+                # Старые правила (созданы до поддержки бизнесов) не хранят
+                # propType — считаем их домами, как было изначально.
+                r_type = rule.get("propType") or "house"
+                budget_key = (r_type, r_pd)
+                frozen_budget[budget_key] = frozen_budget.get(budget_key, 0) + r_count
     frozen_consumed = {}
 
     # Для домов БЕЗ ID мы вынуждены опознавать "тот же дом между сканами"
@@ -355,11 +359,12 @@ def update():
         if e.get("propType") not in ("house", "business"):
             continue
 
-        if e.get("propType") == "house" and pd in frozen_budget:
-            consumed = frozen_consumed.get(pd, 0)
-            if consumed < frozen_budget[pd]:
-                frozen_consumed[pd] = consumed + 1
-                continue  # замороженный дом — не добавляем
+        budget_key = (e.get("propType"), pd)
+        if budget_key in frozen_budget:
+            consumed = frozen_consumed.get(budget_key, 0)
+            if consumed < frozen_budget[budget_key]:
+                frozen_consumed[budget_key] = consumed + 1
+                continue  # замороженный объект — не добавляем
 
         prop_id = e.get("propId")
         pos     = e.get("pos")
@@ -1950,8 +1955,11 @@ def _render_frozen_section():
             if not isinstance(rule, dict):
                 continue
             count += 1
+            r_type = rule.get("propType") or "house"
+            type_label = "🏠 Дом" if r_type == "house" else "🏢 Бизнес"
             rows += f"""<tr>
               <td>{srv}</td>
+              <td>{type_label}</td>
               <td>{rule.get("count","?")}</td>
               <td>{rule.get("pd","?")} PD</td>
               <td>
@@ -1966,21 +1974,26 @@ def _render_frozen_section():
     )
     return f"""
     <div class="card">
-      <h2 style="margin-top:0">Замороженные дома</h2>
+      <h2 style="margin-top:0">Замороженные объекты</h2>
       <p style="color:var(--muted)">
-        На некоторых серверах есть дома, у которых PD зафиксирован и не падает. Укажите сервер, сколько таких
-        домов и на каком PD они стоят — бот будет пропускать ровно столько домов с этим PD при каждом скане.
-        Если реальных (не замороженных) домов на этом же PD окажется больше — лишние всё равно попадут в слёты.
+        На некоторых серверах есть дома или бизнесы, у которых PD зафиксирован и не падает. Укажите сервер, тип,
+        сколько таких объектов и на каком PD они стоят — бот будет пропускать ровно столько объектов этого типа
+        с этим PD при каждом скане. Если реальных (не замороженных) объектов на этом же PD окажется больше —
+        лишние всё равно попадут в слёты.
       </p>
       <form method="post" action="{url_for('admin_frozen_add')}" class="row" style="margin-bottom:14px">
         <select name="server" required><option value="">Сервер</option>{server_options}</select>
-        <input type="number" name="count" placeholder="Кол-во домов" min="1" required style="width:140px">
+        <select name="prop_type" required>
+          <option value="house">🏠 Дом</option>
+          <option value="business">🏢 Бизнес</option>
+        </select>
+        <input type="number" name="count" placeholder="Кол-во" min="1" required style="width:120px">
         <input type="number" name="pd" placeholder="PD" min="1" max="65" required style="width:100px">
         <button type="submit">Добавить</button>
       </form>
       <table>
-        <tr><th>Сервер</th><th>Кол-во</th><th>PD</th><th></th></tr>
-        {rows or "<tr><td colspan='4'>Замороженных домов пока не задано</td></tr>"}
+        <tr><th>Сервер</th><th>Тип</th><th>Кол-во</th><th>PD</th><th></th></tr>
+        {rows or "<tr><td colspan='5'>Замороженных объектов пока не задано</td></tr>"}
       </table>
     </div>
     """
@@ -1988,9 +2001,13 @@ def _render_frozen_section():
 @app.route("/admin/frozen/add", methods=["POST"])
 @admin_only
 def admin_frozen_add():
-    server = request.form.get("server", "")
+    server    = request.form.get("server", "")
+    prop_type = request.form.get("prop_type", "house")
     if server not in VALID_SERVERS:
         flash_msg("err", "Неверный сервер")
+        return redirect(url_for("admin_settings"))
+    if prop_type not in ("house", "business"):
+        flash_msg("err", "Неверный тип объекта")
         return redirect(url_for("admin_settings"))
     try:
         count = int(request.form.get("count", 0))
@@ -2003,8 +2020,9 @@ def admin_frozen_add():
         return redirect(url_for("admin_settings"))
 
     new_ref = db.reference(f"config/frozenHouses/{server}").push()
-    new_ref.set({"pd": pd, "count": count, "addedAt": int(time.time())})
-    flash_msg("ok", f"Добавлено: {count} дом(ов) на {pd} PD для {server}")
+    new_ref.set({"pd": pd, "count": count, "propType": prop_type, "addedAt": int(time.time())})
+    type_label = "дом(ов)" if prop_type == "house" else "бизнес(ов)"
+    flash_msg("ok", f"Добавлено: {count} {type_label} на {pd} PD для {server}")
     return redirect(url_for("admin_settings"))
 
 @app.route("/admin/frozen/<server>/<rule_id>/remove", methods=["POST"])
@@ -2042,8 +2060,8 @@ def _render_exceptions_section():
     <div class="card">
       <h2 style="margin-top:0">Исключения</h2>
       <p style="color:var(--muted)">
-        ID домов/бизнесов, которые никогда не будут попадать в «Слёты» — ни сейчас, ни при последующих сканах.
-        Если ID уже был добавлен ранее, существующая запись будет удалена сразу.
+        ID домов ИЛИ бизнесов (работает для обоих типов), которые никогда не будут попадать в «Слёты» — ни сейчас,
+        ни при последующих сканах. Если ID уже был добавлен ранее, существующая запись будет удалена сразу.
       </p>
       <form method="post" action="{url_for('admin_exception_add')}" class="row" style="margin-bottom:14px">
         <select name="server" required><option value="">Сервер</option>{server_options}</select>
