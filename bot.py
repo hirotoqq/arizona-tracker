@@ -337,9 +337,18 @@ def _effective_floor(pd, d, l):
     последовательность физически никогда не попадёт ровно на 3 — реально
     упрётся в 2. Подгоняем порог под чётность конкретного PD, чтобы
     последовательность "pd, pd-d, pd-2d, ..." гарантированно попадала на
-    него точно."""
-    if d <= 0:
+    него точно.
+
+    Защита от None: если pd/d/l пришли битыми (например запись в базе без
+    нужных полей) — раньше это роняло TypeError прямо посреди обработки
+    списка "Слёты"/"Ближайшие", а поскольку в боте нет общего перехватчика
+    ошибок, пользователь не получал вообще никакого ответа."""
+    if d is None or d <= 0:
         d = 1
+    if pd is None:
+        pd = l if l is not None else 0
+    if l is None:
+        l = 0
     return l - ((pd - l) % d)
 
 def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
@@ -354,13 +363,26 @@ def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
     Раньше списание отсчитывалось от самого scan_ts шагами по 3600 секунд —
     то есть если скан пришёл в 14:35, списания происходили в 15:35, 16:35 и
     т.д., а не в 15:00/16:00 как должно быть по игре. Теперь считаем именно
-    круглые часовые границы."""
+    круглые часовые границы.
+
+    Защита от битых данных: если pd/d_val в базе оказались None (например
+    из-за старой записи без нужных полей) — раньше это роняло TypeError
+    прямо посреди обработки списка, и так как в боте нет общего
+    перехватчика ошибок, пользователь не получал вообще никакого ответа на
+    кнопки вроде "Ближайшие" — одна битая запись "вешала" список для всех."""
     if now is None:
         now = int(time.time())
+    if pd is None:
+        pd = 0
+    if not d_val:
+        d_val = 1
     floor_val = _effective_floor(pd, d_val, drop_at) if drop_at is not None else 0
     if not scan_ts:
         return max(pd, floor_val)
-    scan_ts = int(scan_ts)
+    try:
+        scan_ts = int(scan_ts)
+    except (TypeError, ValueError):
+        return max(pd, floor_val)
 
     scan_dt   = datetime.fromtimestamp(scan_ts, tz=MSK)
     next_hour = scan_dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
@@ -385,15 +407,23 @@ def get_all_props():
         if not isinstance(entries, dict):
             continue
         for k, v in entries.items():
-            expiry = v.get("expiryTs", 0)
-            if expiry <= now:
+            if not isinstance(v, dict):
                 continue
-            insured = v.get("insured")
-            insured = insured if isinstance(insured, bool) else True
-            d_val   = v.get("d") or (1 if insured else 2)
-            drop_at = v.get("dropAt")
-            base_pd = v.get("pd", 0)
-            current_pd = compute_current_pd(base_pd, v.get("scanTs"), d_val, drop_at, now)
+            try:
+                expiry = v.get("expiryTs", 0) or 0
+                if expiry <= now:
+                    continue
+                insured = v.get("insured")
+                insured = insured if isinstance(insured, bool) else True
+                d_val   = v.get("d") or (1 if insured else 2)
+                drop_at = v.get("dropAt")
+                base_pd = v.get("pd") or 0
+                current_pd = compute_current_pd(base_pd, v.get("scanTs"), d_val, drop_at, now)
+            except Exception as e:
+                # Одна битая запись не должна ронять список для всех —
+                # пропускаем именно её и едем дальше.
+                print(f"[get_all_props] Пропущена битая запись {srv}/{k}: {e}")
+                continue
             result.append({
                 "server":    srv,
                 "propType":  v.get("propType", "?"),
@@ -1648,6 +1678,24 @@ async def sync_loop():
             pass
 
 # ── Запуск ───────────────────────────────────────────────
+async def on_error(update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Раньше в боте не было общего перехватчика ошибок — если обработчик
+    кнопки падал с исключением (например из-за битой записи в базе), это
+    просто гасилось библиотекой: пользователь не получал вообще НИЧЕГО в
+    ответ на нажатие, и по этому симптому было невозможно понять, что
+    вообще произошло. Теперь ошибка хотя бы попадёт в лог (видно в Render),
+    и пользователь получит понятное сообщение вместо тишины."""
+    print(f"[on_error] {ctx.error!r}")
+    import traceback
+    traceback.print_exception(type(ctx.error), ctx.error, ctx.error.__traceback__)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "⚠️ Что-то пошло не так при обработке запроса. Попробуй ещё раз чуть позже."
+            )
+        except Exception:
+            pass
+
 def main():
     global all_users, banned_users, subscriptions, _subscription_required
     all_users     = load_users()
@@ -1659,6 +1707,7 @@ def main():
           f"подписчиков на уведомления: {n_sub}, лотерею: {n_lot}, сезон: {n_seas}, с избранным: {n_fav}")
 
     app = Application.builder().token(BOT_TOKEN).build()
+    app.add_error_handler(on_error)
     app.add_handler(CommandHandler("start",     cmd_start))
     app.add_handler(CommandHandler("key",       cmd_key))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
