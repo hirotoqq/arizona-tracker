@@ -2840,10 +2840,30 @@ def admin_realtor_set_insured(server, key):
     insured = request.form.get("insured") == "1"
     prop = db.reference(f"properties/{server}/{key}").get()
     if isinstance(prop, dict):
+        now       = int(time.time())
+        old_d     = prop.get("d") or D_UNINSURED
+        old_drop  = prop.get("dropAt")
+        base_pd   = prop.get("pd", 0)
+        scan_ts   = prop.get("scanTs")
+
+        # Текущий PD ровно на момент нажатия кнопки — считаем ещё по СТАРОЙ
+        # ставке (той, что действовала до этого клика).
+        current_pd_now = compute_current_pd(base_pd, scan_ts, old_d, old_drop, now)
+
         d_val   = D_INSURED if insured else D_UNINSURED
         drop_at = get_drop_at(server, prop.get("propType", "house"), insured)
+
+        # Раньше здесь менялись d/dropAt, но НЕ пересчитывался expiryTs —
+        # "Слёт" оставался посчитан по старой ставке страховки, из-за чего
+        # после смены статуса время переставало соответствовать реальности.
+        # Теперь берём PD, каким он был РОВНО сейчас (см. выше), и от него
+        # считаем новое время слёта уже по новой ставке — как будто скан
+        # только что произошёл заново с этим PD.
+        new_expiry = calc_expiry_from_pdl(current_pd_now, d_val, drop_at, now)
+
         db.reference(f"properties/{server}/{key}").update({
             "insured": insured, "d": d_val, "dropAt": drop_at,
+            "pd": current_pd_now, "scanTs": now, "expiryTs": new_expiry,
         })
         flash_msg("ok", "Статус страховки обновлён")
     else:
