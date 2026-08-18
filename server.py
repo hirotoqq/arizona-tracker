@@ -198,7 +198,7 @@ def _add_valid_hours(start_ts, n):
 def calc_expiry_ts(pd, drop_at, now=None):
     if now is None:
         now = int(time.time())
-    hours_left = max(pd - drop_at, 0)
+    hours_left = max(pd - (drop_at - 1), 0)
     return _add_valid_hours(now, hours_left)
 
 def calc_expiry_from_pdl(pd, d, l, now=None):
@@ -206,8 +206,13 @@ def calc_expiry_from_pdl(pd, d, l, now=None):
         now = int(time.time())
     if d <= 0:
         d = 1
-    diff = pd - l
-    hours_left = max(-(-diff // d), 0) if diff > 0 else 0  # ceil(diff / d), сколько ровно часов нужно, без лишнего +1
+    # +1 час намеренно: дом реально падает не в момент, когда PD впервые
+    # ПОКАЗЫВАЕТ порог l, а на следующей часовой границе после этого — грубо
+    # говоря, порог l — это ещё "последний живой" PD, а не сам момент слёта.
+    # Раньше здесь была версия без +1 (казалось, что это лишний буфер), но
+    # по факту сайт из-за этого показывал "Слёт" на один PD/час раньше,
+    # чем должен — возвращено.
+    hours_left = max((pd - l) // d + 1, 0)
     return _add_valid_hours(now, hours_left)
 
 KEY_ALPHABET  = string.ascii_uppercase + string.digits
@@ -353,19 +358,28 @@ def update():
         if e.get("propType") not in ("house", "business"):
             continue
 
+        prop_id = e.get("propId")
+        pos     = e.get("pos")
+
+        # Исключённые ID (Настройки → Исключения) никогда не попадают в слёты.
+        # ВАЖНО: эта проверка должна идти ДО заморозки по PD (ниже). Раньше
+        # было наоборот — и если для одних и тех же "замороженных" домов
+        # настроены ОБА механизма сразу (и точный ID в исключениях, и общий
+        # лимит "N домов на PD=X" в заморозке), лимит заморозки тратился на
+        # ПЕРВЫЕ встреченные в скане дома с этим PD — какими они окажутся,
+        # зависело от порядка в скане, и иногда лимит "съедал" реальный дом,
+        # который должен был остаться в списке, а не один из уже
+        # исключённых по ID. Теперь дома, исключённые по ID, отсеиваются
+        # заранее и вообще не участвуют в трате лимита заморозки.
+        if prop_id and str(prop_id) in excluded_ids:
+            continue
+
         budget_key = (e.get("propType"), pd)
         if budget_key in frozen_budget:
             consumed = frozen_consumed.get(budget_key, 0)
             if consumed < frozen_budget[budget_key]:
                 frozen_consumed[budget_key] = consumed + 1
                 continue  # замороженный объект — не добавляем
-
-        prop_id = e.get("propId")
-        pos     = e.get("pos")
-
-        # Исключённые ID (Настройки → Исключения) никогда не попадают в слёты
-        if prop_id and str(prop_id) in excluded_ids:
-            continue
 
         # Ключ записи должен быть стабильным между сканами одного и того же
         # дома — иначе каждый скан плодит новую запись вместо обновления
