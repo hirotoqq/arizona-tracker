@@ -62,6 +62,60 @@ SEASON_TABLES = [
     [5,2,3,2,5,5,4,3,5,3,2,3,1,4,4,1,1,1,2,4,1,2,5,3,3,3,1,3,3,3,3,1],
 ]
 
+TAXES_TEXT = (
+    "💰 *Налоги по серверам*\n\n"
+    "```\n"
+    "Сервер        Дом  Бизнес\n"
+    "-------------------------\n"
+    "Phoenix      1000    2100\n"
+    "Tucson       1000    2000\n"
+    "Scottdale    1000    1500\n"
+    "Chandler     1000    2000\n"
+    "Brainburg    1000    2000\n"
+    "Saint-Rose   1000    2500\n"
+    "Mesa         1000    2000\n"
+    "Red-Rock     1000    2400\n"
+    "Yuma          650    1000\n"
+    "Surprise     1000    3000\n"
+    "Prescott     1000    1000\n"
+    "Glendale     1000    2300\n"
+    "Kingman       800    2600\n"
+    "Winslow      1000    3500\n"
+    "Payson        619    1489\n"
+    "Gilbert      1000    2700\n"
+    "Show Low      619    1489\n"
+    "Casa-Grande  1000    2500\n"
+    "Page         1000    2000\n"
+    "Sun-City      700    1350\n"
+    "Queen-Creek  1000    2000\n"
+    "Sedona       1000    1500\n"
+    "Holiday      1000    2000\n"
+    "Wednesday    1000    2200\n"
+    "Yava          650    1300\n"
+    "Faraway       780    1250\n"
+    "Bumble Bee    900    1300\n"
+    "Christmas     500    1000\n"
+    "Mirage        600    1000\n"
+    "Love          900    2100\n"
+    "Drake        1000    2000\n"
+    "Vice City       1       1\n"
+    "Space         900    2000\n"
+    "```"
+)
+
+GPU_DROP_TEXT = (
+    "🎮 *Слёт видеокарт*\n\n"
+    "Время слёта видеокарт по МСК:\n\n"
+    "🕑 02:00\n"
+    "🕔 05:00\n"
+    "🕗 08:00\n"
+    "🕚 11:00\n"
+    "🕑 14:00\n"
+    "🕔 17:00\n"
+    "🕗 20:00\n"
+    "🕚 23:00"
+)
+
 SEASON_EPOCH = datetime(2026, 6, 22, 6, 5, 0, tzinfo=MSK)
 
 def get_current_week_index():
@@ -535,6 +589,47 @@ def build_list_text(props, title="📋 Актуальные слёты", page=0,
     return header, block, total_pages
 
 # ── Клавиатура ────────────────────────────────────────────
+TAXES_TEXT = (
+    "💰 *Налоги по серверам*\n\n"
+    "```\n"
+    "Сервер       Дом   Бизнес \n"
+    "--------------------------\n"
+    "Phoenix      1000  2100   \n"
+    "Tucson       1000  2000   \n"
+    "Scottdale    1000  1500   \n"
+    "Chandler     1000  2000   \n"
+    "Brainburg    1000  2000   \n"
+    "Saint-Rose   1000  2500   \n"
+    "Mesa         1000  2000   \n"
+    "Red-Rock     1000  2400   \n"
+    "Yuma         650   1000   \n"
+    "Surprise     1000  3000   \n"
+    "Prescott     1000  1000   \n"
+    "Glendale     1000  2300   \n"
+    "Kingman      800   2600   \n"
+    "Winslow      1000  3500   \n"
+    "Payson       619   1489   \n"
+    "Gilbert      1000  2700   \n"
+    "Show Low     619   1489   \n"
+    "Casa-Grande  1000  2500   \n"
+    "Page         1000  2000   \n"
+    "Sun-City     700   1350   \n"
+    "Queen-Creek  1000  2000   \n"
+    "Sedona       1000  1500   \n"
+    "Holiday      1000  2000   \n"
+    "Wednesday    1000  2200   \n"
+    "Yava         650   1300   \n"
+    "Faraway      780   1250   \n"
+    "Bumble Bee   900   1300   \n"
+    "Christmas    500   1000   \n"
+    "Mirage       600   1000   \n"
+    "Love         900   2100   \n"
+    "Drake        1000  2000   \n"
+    "Vice City    1     1      \n"
+    "Space        900   2000   \n"
+    "```"
+)
+
 def permanent_keyboard():
     return ReplyKeyboardMarkup([
         [KeyboardButton("📋 Все слёты"),     KeyboardButton("⚠️ Ближайшие")],
@@ -542,7 +637,8 @@ def permanent_keyboard():
         [KeyboardButton("🗺 По серверу"),    KeyboardButton("⭐️ Избранное")],
         [KeyboardButton("🔔 Уведомления"),   KeyboardButton("🎰 Лотерея")],
         [KeyboardButton("📜 История"),       KeyboardButton("🏆 Сезоны")],
-        [KeyboardButton("🏡 Дома с поместьями")],
+        [KeyboardButton("🏡 Дома с поместьями"), KeyboardButton("💰 Налоги")],
+        [KeyboardButton("🎮 Слёт видеокарт")],
         [KeyboardButton("👤 Профиль")],
     ], resize_keyboard=True, is_persistent=True)
 
@@ -631,7 +727,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🔔 *Уведомления* — настрой оповещения о слётах\n"
         "🎰 *Лотерея* — напоминание о билетах в 21:10 МСК\n"
         f"📜 *История* — слёты за последние {HISTORY_HOURS}ч\n"
-        "🏡 *Дома с поместьями* — картинка и описание по серверу\n\n"
+        "🏡 *Дома с поместьями* — картинка и описание по серверу\n"
+        "💰 *Налоги* — таблица налогов на дома и бизнесы по серверам\n"
+        "🎮 *Слёт видеокарт* — время слёта видеокарт по МСК\n\n"
         "👨‍💻 Разработчик: @hirotoqq"
     )
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=permanent_keyboard())
@@ -910,6 +1008,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif t == "📜 История":           await show_history(update, ctx)
     elif t == "🏆 Сезоны":            await show_seasons(update, ctx)
     elif t == "🏡 Дома с поместьями": await show_estates_menu(update, ctx)
+    elif t == "💰 Налоги":            await update.message.reply_text(TAXES_TEXT, parse_mode="Markdown")
+    elif t == "🎮 Слёт видеокарт":    await update.message.reply_text(GPU_DROP_TEXT, parse_mode="Markdown")
 
 # ── Показ списков ─────────────────────────────────────────
 async def show_list(update, ctx, page=0):
