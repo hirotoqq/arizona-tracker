@@ -533,6 +533,70 @@ def fmt_time_left(hours_left, mins_left):
         return f"через {mins_left} мин"
     return f"через {hours_left}ч"
 
+TELEGRAM_MAX_LEN = 4096
+
+def _split_text_for_telegram(text, limit=TELEGRAM_MAX_LEN):
+    """Режем длинный текст на куски <= limit символов, стараясь резать по границам строк,
+    чтобы не сломать markdown-разметку посреди строки."""
+    if len(text) <= limit:
+        return [text]
+
+    parts  = []
+    lines  = text.split("\n")
+    chunk  = ""
+    for line in lines:
+        # если даже одна строка длиннее лимита - режем её жёстко
+        while len(line) > limit:
+            if chunk:
+                parts.append(chunk)
+                chunk = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+
+        candidate = chunk + ("\n" if chunk else "") + line
+        if len(candidate) > limit:
+            parts.append(chunk)
+            chunk = line
+        else:
+            chunk = candidate
+
+    if chunk:
+        parts.append(chunk)
+
+    return parts
+
+async def send_long_text(update, text, parse_mode="Markdown", reply_markup=None):
+    """Отправляет/редактирует сообщение, автоматически разбивая на несколько частей,
+    если текст превышает лимит Telegram (4096 символов). reply_markup вешается
+    только на последнюю часть."""
+    parts = _split_text_for_telegram(text)
+
+    if update.message:
+        for i, part in enumerate(parts):
+            kb = reply_markup if i == len(parts) - 1 else None
+            await update.message.reply_text(part, parse_mode=parse_mode, reply_markup=kb)
+    else:
+        query = update.callback_query
+        # первую часть - редактируем существующее сообщение, остальные - новыми сообщениями
+        first_kb = reply_markup if len(parts) == 1 else None
+        await query.edit_message_text(parts[0], parse_mode=parse_mode, reply_markup=first_kb)
+        for i, part in enumerate(parts[1:], start=1):
+            kb = reply_markup if i == len(parts) - 1 else None
+            await query.message.reply_text(part, parse_mode=parse_mode, reply_markup=kb)
+
+async def send_long_text_query(query, text, parse_mode="Markdown", reply_markup=None):
+    """Как send_long_text, но для случаев, где уже есть callback_query и используется
+    try/except-фолбэк edit -> reply (например, если исходное сообщение нельзя редактировать)."""
+    parts = _split_text_for_telegram(text)
+    first_kb = reply_markup if len(parts) == 1 else None
+    try:
+        await query.edit_message_text(parts[0], parse_mode=parse_mode, reply_markup=first_kb)
+    except Exception:
+        await query.message.reply_text(parts[0], parse_mode=parse_mode, reply_markup=first_kb)
+    for i, part in enumerate(parts[1:], start=1):
+        kb = reply_markup if i == len(parts) - 1 else None
+        await query.message.reply_text(part, parse_mode=parse_mode, reply_markup=kb)
+
 def build_list_text(props, title="📋 Актуальные слёты", page=0, hide_season=False, no_pages=False):
     if not props:
         return "✅ Слётов нет или данных пока нет.", "", 0
@@ -1047,19 +1111,13 @@ async def show_list(update, ctx, page=0):
     header, block, total = build_list_text(props, page=page)
     btns = _page_buttons(page, total, "list")
     kb   = InlineKeyboardMarkup(btns) if btns else None
-    if update.message:
-        await update.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
-    else:
-        await update.callback_query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
+    await send_long_text(update, header + "\n" + block, reply_markup=kb)
 
 async def show_soon(update, ctx, page=0):
     props = [p for p in get_all_props() if p["hoursLeft"] <= 3]
     header, block, total = build_list_text(props, "⚠️ Слёты в ближайшие 3 часа", no_pages=True)
     kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔄", callback_data="soon_refresh")]])
-    if update.message:
-        await update.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
-    else:
-        await update.callback_query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
+    await send_long_text(update, header + "\n" + block, reply_markup=kb)
 
 async def show_mass_drop(update, ctx, page=0):
     props = get_all_props()
@@ -1079,10 +1137,7 @@ async def show_mass_drop(update, ctx, page=0):
     header, block, total = build_list_text(filtered, f"💥 Массовые слёты ({MASS_DROP_MIN}+)", page=page)
     btns = _page_buttons(page, total, "mass")
     kb   = InlineKeyboardMarkup(btns) if btns else None
-    if update.message:
-        await update.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
-    else:
-        await update.callback_query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
+    await send_long_text(update, header + "\n" + block, reply_markup=kb)
 
 async def show_filter_menu(update, ctx):
     buttons = []
@@ -1175,10 +1230,7 @@ async def show_favorites(update, ctx, page=0):
     btns = _page_buttons(page, total, "fav")
     btns.append([InlineKeyboardButton("✏️ Изменить", callback_data="fav_edit")])
     kb = InlineKeyboardMarkup(btns)
-    if update.message:
-        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
-    else:
-        await update.callback_query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+    await send_long_text(update, text, reply_markup=kb)
 
 async def show_favorites_edit(update, ctx):
     chat_id = update.effective_chat.id
@@ -1317,10 +1369,7 @@ async def show_history(update, ctx, page=0):
     header, block, total = build_list_text(history, f"📜 История слётов (последние {HISTORY_HOURS}ч)", page=page)
     btns = _page_buttons(page, total, "hist")
     kb   = InlineKeyboardMarkup(btns) if btns else None
-    if update.message:
-        await update.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
-    else:
-        await update.callback_query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=kb)
+    await send_long_text(update, header + "\n" + block, reply_markup=kb)
 
 # ── Callbacks ─────────────────────────────────────────────
 async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1423,10 +1472,7 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         header, block, total = build_list_text(props, f"{season_emoji} {season_name}")
         btns = _page_buttons(0, total, f"fseas{season_num}")
         btns.append([InlineKeyboardButton("◀️ К фильтру", callback_data="back_filter")])
-        try:
-            await query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
-        except Exception:
-            await query.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+        await send_long_text_query(query, header + "\n" + block, reply_markup=InlineKeyboardMarkup(btns))
 
     elif data.startswith("fseas"):
         # формат fseas{num}_page_{n}
@@ -1443,10 +1489,7 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         header, block, total = build_list_text(props, f"{season_emoji} {season_name}", page=page)
         btns = _page_buttons(page, total, f"fseas{season_num}")
         btns.append([InlineKeyboardButton("◀️ К фильтру", callback_data="back_filter")])
-        try:
-            await query.edit_message_text(header + "\n" + block, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
-        except Exception:
-            await query.message.reply_text(header + "\n" + block, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+        await send_long_text_query(query, header + "\n" + block, reply_markup=InlineKeyboardMarkup(btns))
 
     elif data == "back_filter":
         await show_filter_menu(update, ctx)
@@ -1467,11 +1510,7 @@ async def cb_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         header, block, total = build_list_text(props, f"📋 {server}", page=0, hide_season=True)
         text = warn + header + "\n" + block + f"\n\n🏆 Сезон: {s_emoji} {season_name}\n🕐 _Последний скан: {scan_str}_"
         buttons            = [[InlineKeyboardButton("◀️ К серверам", callback_data="action_servers")]]
-        try:
-            await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
-        except Exception:
-            # fallback: отправим новое сообщение, если редактировать нельзя
-            await query.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+        await send_long_text_query(query, text, reply_markup=InlineKeyboardMarkup(buttons))
 
     elif data == "action_notify_toggle":
         if chat_id in subscribers: subscribers.discard(chat_id)
