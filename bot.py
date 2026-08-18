@@ -276,6 +276,18 @@ def save_user(chat_id, user=None):
             data["name"] = user.full_name
     db.reference(f"users/{chat_id}").set(data)
 
+def _effective_floor(pd, d, l):
+    """Настроенный порог (l) подобран по НОРМАЛЬНОЙ последовательности PD
+    (например для нестрахованных домов: 7→5→3→слёт, порог=3). Но если у
+    конкретного дома PD идёт по другой чётности (8→6→4→2→слёт),
+    последовательность физически никогда не попадёт ровно на 3 — реально
+    упрётся в 2. Подгоняем порог под чётность конкретного PD, чтобы
+    последовательность "pd, pd-d, pd-2d, ..." гарантированно попадала на
+    него точно."""
+    if d <= 0:
+        d = 1
+    return l - ((pd - l) % d)
+
 def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
     """PD на текущий момент: убывает на d_val на каждой КРУГЛОЙ границе часа
     (00 минут) с момента скана (1/час для застрахованных, 2/час для
@@ -291,7 +303,7 @@ def compute_current_pd(pd, scan_ts, d_val, drop_at, now=None):
     круглые часовые границы."""
     if now is None:
         now = int(time.time())
-    floor_val = drop_at if drop_at is not None else 0
+    floor_val = _effective_floor(pd, d_val, drop_at) if drop_at is not None else 0
     if not scan_ts:
         return max(pd, floor_val)
     scan_ts = int(scan_ts)
