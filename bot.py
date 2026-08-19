@@ -70,7 +70,7 @@ TAXES_TEXT = (
     "Phoenix      1000    2100\n"
     "Tucson       1000    2000\n"
     "Scottdale    1000    1500\n"
-    "Chandler     1000    2000\n"
+    "Chandler     500    1300\n"
     "Brainburg    1000    2000\n"
     "Saint-Rose   1000    2500\n"
     "Mesa         1000    2000\n"
